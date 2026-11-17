@@ -2009,7 +2009,7 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
         rail_y, rail_x = np.nonzero(road_weight == 8)
         fence_clear = fronts | set(zip(rail_x.tolist(), rail_y.tolist()))
     paths, yard_fences = paint_paths(out_dir, map_name, rows, occupied, drives,
-                                     porch_lights, fronts=fronts)
+                                     porch_lights, fronts=fronts, settings=settings)
     # The lights stand outside the houses, past the edge of their own .tbx.
     from .structures import pack_loose
     light_placements = pack_loose(bdir, map_name, "lights", porch_lights,

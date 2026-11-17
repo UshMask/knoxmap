@@ -26,6 +26,7 @@ from PIL import Image, ImageDraw
 import knoxfiles
 import knoxlog
 import knoxstop
+from knoxbuild.settings import DEFAULT_STREET_SETTINGS, StreetSettings
 
 from . import pz_colors as C
 from . import structures
@@ -45,7 +46,7 @@ from .rendering.infill import _back_sheds, _infill_frontage
 from .rendering.furniture import (CRACK_SHARE, DRAIN_EVERY,
                                   EDGE_LINE_MIN_WIDTH, GRIME_SHARE,
                                   HYDRANT_EVERY, LAMP_EVERY, LITTER_SHARE,
-                                  ROAD_FURNITURE_INTERVALS, SPEED_BY_WIDTH,
+                                  ROAD_FURNITURE_INTERVALS, _road_furniture_mask,
                                   SPEED_SIGN_EVERY, _mod_tiles_ready,
                                   _paint_street_furniture)  # noqa: F401
 from .rendering.geometry import (_draw_line, _draw_roads, _draw_polygon, _feature_coords_px,
@@ -351,6 +352,7 @@ def render(features: Iterable[OSMFeature], south: float, west: float,
            forest_stand_m: float = 60,
            forest_edge_m: float = 30,
            forest_params=None,
+           street_settings: StreetSettings = DEFAULT_STREET_SETTINGS,
            rotation: float = 0.0,
            osm_cache: str | None = None,
            osm_bbox: tuple[float, float, float, float] | None = None,
@@ -379,6 +381,7 @@ def render(features: Iterable[OSMFeature], south: float, west: float,
             spawn_density=spawn_density, tree_density=tree_density,
             forest_density=forest_density, forest_stand_m=forest_stand_m,
             forest_edge_m=forest_edge_m, forest_params=forest_params,
+            street_settings=street_settings,
             rotation=rotation, osm_cache=osm_cache, osm_bbox=osm_bbox,
             shape=shape, straight_roads=straight_roads,
             include_proposed_roads=include_proposed_roads,
@@ -754,9 +757,11 @@ def render(features: Iterable[OSMFeature], south: float, west: float,
     _paint_road_details(vegetation, landscape, buckets, proj,
                         smooth_edges=(road_layout != 5))
     hierarchy_image = _road_hierarchy_image(buckets, proj)
-    # Where the buildings are, so a hydrant, a bin or a mailbox only stands
-    # where it has something to serve.
-    _paint_street_furniture(vegetation, landscape, hierarchy_image, building_mask)
+    road_furniture = _road_furniture_mask(buckets, proj, ground_rings,
+                                          crisp=(road_layout == 5))
+    _paint_street_furniture(vegetation, landscape, hierarchy_image, building_mask,
+                            road_furniture=road_furniture, features=features,
+                            proj=proj, clip=clip, settings=street_settings)
     t_details = time.perf_counter()
     # Nothing grows through a deck or a ramp, and no lamp stands on one.
     veg_px = vegetation.load()

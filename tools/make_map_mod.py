@@ -278,8 +278,7 @@ def write_spawnpoints(project_dir: str, map_dir: str, limit: int = 8) -> int:
 
 
 def write_objects(project_dir: str, map_dir: str) -> dict[str, int]:
-    """Write objects.lua, the zones the game reads: ParkingStall is the only
-    place a vehicle ever spawns, TownZone marks ground as town.
+    """Write objects.lua, including map-authored parking, traffic jams and town zones.
 
     The zones are in the WorldEd project, but compiling lots does not export
     them - maps went into the game with no objects.lua at all, and so without

@@ -5,7 +5,22 @@ from PIL import Image
 
 from generator import pz_colors as C
 from generator import renderer
+from generator.osm import OSMFeature
 from generator.rendering import furniture
+from knoxbuild.settings import StreetSettings
+
+
+class TileProjector:
+    width = height = 40
+    meters_per_tile = 1.0
+
+    @staticmethod
+    def to_px(x, y):
+        return x, y
+
+
+def osm_node(osm_id, x, y, **tags):
+    return OSMFeature(osm_id, "node", tags, [(x, y)])
 
 
 class RoadFurniturePlacement(unittest.TestCase):
@@ -25,8 +40,9 @@ class RoadFurniturePlacement(unittest.TestCase):
         for mod_tiles, prop in ((True, "speed"), (False, "lamp")):
             with self.subTest(prop=prop):
                 vegetation, ground = self.make_road(C.DARK_ASPHALT)
+                road_tags = Image.new("L", ground.size, 25) if mod_tiles else None
                 with mock.patch.object(furniture, "_mod_tiles_ready", return_value=mod_tiles):
-                    renderer._paint_street_furniture(vegetation, ground)
+                    renderer._paint_street_furniture(vegetation, ground, road_furniture=road_tags)
                 blocked_color = (C.SPEED_SIGNS[(25, "S")] if prop == "speed"
                                  else C.LAMP_W)
                 self.assertNotEqual(vegetation.getpixel((14, 20)), blocked_color)
@@ -37,10 +53,68 @@ class RoadFurniturePlacement(unittest.TestCase):
             counts = renderer._paint_street_furniture(vegetation, ground)
         self.assertGreater(counts.get("lamp", 0), 0)
 
+    def road_tags(self, **tags):
+        way = OSMFeature(1, "way", {"highway": "residential", "width": "5", **tags},
+                         [(10, 0), (10, 39)])
+        return furniture._road_furniture_mask(
+            {"road_minor": [way]}, TileProjector(), lambda feat: [feat.geometry])
+
+    def test_speed_signs_use_supported_osm_values(self):
+        for tags, expected in (({"maxspeed": "35 mph"}, 35),
+                               ({"maxspeed": "35"}, None),
+                               ({"maxspeed": "RU:urban"}, None),
+                               ({"maxspeed": "30 mph"}, None),
+                               ({"maxspeed": "35 mph", "maxspeed:forward": "25 mph"}, None),
+                               ({}, None)):
+            with self.subTest(tags=tags):
+                vegetation, ground = self.make_road(C.DARK_GRASS)
+                with mock.patch.object(furniture, "_mod_tiles_ready", return_value=True):
+                    renderer._paint_street_furniture(
+                        vegetation, ground, road_furniture=self.road_tags(**tags))
+                signs = set(vegetation.get_flattened_data()) & set(C.SPEED_SIGNS.values())
+                self.assertEqual(signs, {C.SPEED_SIGNS[(expected, "S")]} if expected else set())
+
+    def test_unlit_road_keeps_only_the_mapped_lamp(self):
+        vegetation, ground = self.make_road(C.DARK_GRASS)
+        counts = renderer._paint_street_furniture(
+            vegetation, ground, road_furniture=self.road_tags(lit="no"),
+            features=[osm_node(2, 13, 20, highway="street_lamp")], proj=TileProjector())
+        self.assertEqual(counts.get("lamp"), 1)
+        self.assertEqual(vegetation.getpixel((13, 20)), C.LAMP_W)
+
+    def test_lighting_is_inferred_near_buildings_or_from_lit_yes(self):
+        no_buildings = Image.new("L", (40, 40))
+        for tags, expected in (({}, False), ({"lit": "yes"}, True)):
+            with self.subTest(tags=tags):
+                vegetation, ground = self.make_road(C.DARK_GRASS)
+                counts = renderer._paint_street_furniture(
+                    vegetation, ground, buildings=no_buildings, road_furniture=self.road_tags(**tags))
+                self.assertEqual(bool(counts.get("lamp", 0)), expected)
+
+    def test_generated_lamps_leave_space_around_mapped_lamps(self):
+        vegetation, ground = self.make_road(C.DARK_GRASS)
+        renderer._paint_street_furniture(
+            vegetation, ground, features=[osm_node(2, 13, 20, highway="street_lamp")],
+            proj=TileProjector())
+        lamps = {C.LAMP_W, C.LAMP_E, C.LAMP_N, C.LAMP_S}
+        nearby = {(x, y) for x in range(40) for y in range(40)
+                  if vegetation.getpixel((x, y)) in lamps
+                  and (x - 13) ** 2 + (y - 20) ** 2 < furniture.FURNITURE_CLEARANCE ** 2}
+        self.assertEqual(nearby, {(13, 20)})
+
+    def test_lamp_modes_and_zero_density_keep_mapped_points_when_enabled(self):
+        for mode, density, count in (("osm", 3.0, 1), ("context", 0.0, 1), ("off", 3.0, 0)):
+            with self.subTest(mode=mode, density=density):
+                vegetation, ground = self.make_road(C.DARK_GRASS)
+                counts = renderer._paint_street_furniture(
+                    vegetation, ground, proj=TileProjector(), road_furniture=self.road_tags(lit="yes"),
+                    features=[osm_node(2, 13, 20, highway="street_lamp")],
+                    settings=StreetSettings(street_lamp_mode=mode, street_lamp_density=density))
+                self.assertEqual(counts.get("lamp", 0), count)
+
 
 class RoadsideProps(unittest.TestCase):
-    """Hydrants, bins, mailboxes, benches, kiosks and collection boxes only
-    stand beside a sidewalk where there is a building to serve."""
+    """Procedural roadside props and objects placed from mapped points."""
 
     def long_road(self, length=180):
         ground = Image.new("RGB", (length, 24), C.DARK_GRASS)
@@ -134,24 +208,86 @@ class RoadsideProps(unittest.TestCase):
         self.assertFalse([1 for x in range(ground.width) for y in range(ground.height)
                           if vegetation.getpixel((x, y)) in {*C.BENCH_Y, *C.BENCH_X}])
 
-    def test_the_kiosk_and_the_collection_box_stand_by_the_sidewalk(self):
+    def test_the_kiosk_and_collection_box_follow_osm_points(self):
         vegetation, ground = self.long_road()
         with mock.patch.object(furniture, "_mod_tiles_ready", return_value=False), \
                 mock.patch.object(furniture, "_rule_ready", return_value=True):
             counts = renderer._paint_street_furniture(
-                vegetation, ground, None,
-                self.buildings_near(ground.size, (10, 0, 60, 24)))
-        self.assertGreater(counts.get("kiosk", 0), 0)
-        self.assertGreater(counts.get("postbox", 0), 0)
-        self.assertIn(C.KIOSK_W, {vegetation.getpixel((x, y))
-                                  for x in range(ground.width)
-                                  for y in range(ground.height)})
+                vegetation, ground, proj=TileProjector(), features=[
+                    osm_node(1, 13, 10, shop="kiosk"),
+                    osm_node(2, 13, 18, amenity="post_box"),
+                    osm_node(3, 100, 18, amenity="post_office"),
+                ])
+        self.assertEqual(counts.get("kiosk"), 1)
+        self.assertEqual(counts.get("postbox"), 1)
+        self.assertEqual(vegetation.getpixel((13, 10)), C.KIOSK_W)
+        self.assertEqual(vegetation.getpixel((13, 18)), C.POSTBOX_W)
+
+    def test_mapped_props_skip_buildings_and_snap_off_the_road(self):
+        vegetation, ground = self.long_road()
+        buildings = self.buildings_near(ground.size, (20, 10, 23, 14))
+        with mock.patch.object(furniture, "_rule_ready", return_value=True):
+            counts = renderer._paint_street_furniture(
+                vegetation, ground, buildings=buildings, proj=TileProjector(), features=[
+                    osm_node(1, 21, 11, shop="kiosk"),
+                    osm_node(2, 10, 18, amenity="post_box"),
+                ])
+        self.assertEqual(counts.get("kiosk", 0), 0)
+        self.assertEqual(vegetation.getpixel((12, 18)), C.POSTBOX_W)
+
+    def test_bins_follow_explicit_points_and_stops_with_pavement(self):
+        vegetation, ground = self.long_road(length=80)
+        # A separate platform well away from the street.
+        ground.paste(C.PALE_CONCRETE, (40, 5, 45, 12))
+        counts = renderer._paint_street_furniture(
+            vegetation, ground, proj=TileProjector(), features=[
+                osm_node(1, 13, 4, amenity="waste_basket"),
+                osm_node(2, 12, 6, highway="bus_stop"),
+                osm_node(3, 41, 6, public_transport="platform", bus="yes"),
+                osm_node(4, 42, 6, highway="bus_stop"),
+                osm_node(5, 70, 8, highway="bus_stop"),
+            ])
+        self.assertEqual(counts.get("bin"), 2)
+        self.assertEqual(vegetation.getpixel((13, 4)), C.BIN)
+        self.assertEqual(vegetation.getpixel((41, 6)), C.BIN)
+
+    def test_stop_bin_leaves_a_narrow_sidewalk_clear(self):
+        vegetation, ground = self.long_road()
+        counts = renderer._paint_street_furniture(
+            vegetation, ground, proj=TileProjector(),
+            features=[osm_node(1, 12, 6, highway="bus_stop")])
+        self.assertEqual(counts.get("bin"), 1)
+        self.assertEqual(vegetation.getpixel((13, 6)), C.BIN)
+
+    def test_zero_stop_bin_density_keeps_the_mapped_bin(self):
+        vegetation, ground = self.long_road()
+        counts = renderer._paint_street_furniture(
+            vegetation, ground, proj=TileProjector(), features=[
+                osm_node(1, 13, 4, amenity="waste_basket"),
+                osm_node(2, 12, 22, highway="bus_stop"),
+            ], settings=StreetSettings(street_bin_density=0))
+        self.assertEqual(counts.get("bin"), 1)
+        self.assertEqual(vegetation.getpixel((13, 4)), C.BIN)
+
+    def test_no_fabricated_street_mailboxes_postboxes_kiosks_or_bins(self):
+        vegetation, ground = self.long_road()
+        with mock.patch.object(furniture, "_rule_ready", return_value=True):
+            renderer._paint_street_furniture(
+                vegetation, ground, buildings=self.buildings_near(ground.size, (15, 0, 60, 24)))
+        removed = {C.MAILBOX, C.BIN}
+        removed.update(getattr(C, f"{kind}_{facing}")
+                       for kind in ("KIOSK", "POSTBOX") for facing in "NESW")
+        self.assertFalse(set(vegetation.get_flattened_data()) & removed)
 
     def test_without_the_rules_none_of_the_new_props_are_painted(self):
         vegetation, ground = self.long_road()
         with mock.patch.object(furniture, "_mod_tiles_ready", return_value=False), \
                 mock.patch.object(furniture, "_rule_ready", return_value=False):
-            counts = renderer._paint_street_furniture(vegetation, ground)
+            counts = renderer._paint_street_furniture(
+                vegetation, ground, proj=TileProjector(), features=[
+                    osm_node(1, 13, 10, shop="kiosk"),
+                    osm_node(2, 13, 18, amenity="post_box"),
+                ])
         for what in ("bench", "kiosk", "postbox"):
             self.assertEqual(counts.get(what, 0), 0)
 
@@ -188,11 +324,10 @@ class RoadsideProps(unittest.TestCase):
         mask = self.buildings_near(ground.size, (10, 8, 60, 16))
         with mock.patch.object(furniture, "_mod_tiles_ready", return_value=False):
             counts = renderer._paint_street_furniture(vegetation, ground, None, mask)
-        props = [C.HYDRANT, C.BIN, C.MAILBOX]
+        props = [C.HYDRANT]
         xs = [x for x in range(ground.width) for y in range(ground.height)
               if vegetation.getpixel((x, y)) in props]
-        self.assertTrue(counts.get("hydrant", 0) or counts.get("bin", 0) or
-                        counts.get("mailbox", 0), "nothing was placed at all")
+        self.assertGreater(counts.get("hydrant", 0), 0)
         self.assertTrue(xs)
         self.assertLessEqual(max(xs) - min(xs), 60 + 2 * furniture.NEAR_BUILDING_TILES,
                              f"props out on open road at {sorted(set(xs))}")
@@ -202,7 +337,7 @@ class RoadsideProps(unittest.TestCase):
         mask = self.buildings_near(ground.size, (10, 0, 60, 24))
         with mock.patch.object(furniture, "_mod_tiles_ready", return_value=False):
             renderer._paint_street_furniture(vegetation, ground, None, mask)
-        props = [C.HYDRANT, C.BIN, C.MAILBOX]
+        props = [C.HYDRANT]
         for x in range(ground.width):
             for y in range(ground.height):
                 if vegetation.getpixel((x, y)) not in props:

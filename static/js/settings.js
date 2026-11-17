@@ -51,7 +51,25 @@ const SETTING_LABELS = {
   arch_style:         ['Architecture', 'Auto reads the map\u2019s own building names: a town written in Chinese gets flat-roofed masonry blocks, taller self-built houses and walk-up flats, the way it is really built there. Chinese forces that look. Default builds every town like the game\u2019s own Kentucky.'],
   neighbourhood_tiles: ['Neighbourhood', 'How far one set of materials reaches.'],
   style_oddity:        ['Odd one out', 'How often a building breaks from its block.'],
-  parking_density:     ['Parking', 'Vehicles only ever spawn in a parking stall.'],
+  street_lamp_mode:    ['Street lamp placement', 'Local rules add lamps near buildings and on streets marked as lit. Unlit streets get only mapped lamps.'],
+  street_lamp_density: ['Automatic lamps', 'Scales lamps placed by the local rules, including those in car parks and works yards. Mapped lamps keep their places.'],
+  street_pole_density: ['Utility poles', 'Scales poles on verges by road class.'],
+  street_bin_mode:     ['Public bin placement', 'Local rules add bins at bus stops where there is room to pass.'],
+  street_bin_density:  ['Bins at bus stops', 'Share of eligible stops that get an automatic bin. Mapped bins keep their places.'],
+  street_verge_scope:  ['Benches and hydrants placement', 'Choose whether to limit benches and hydrants to sidewalks near buildings.'],
+  street_bench_density: ['Benches', 'Scales benches on free tiles beside sidewalks.'],
+  street_hydrant_density: ['Hydrants', 'Scales hydrants on free tiles beside sidewalks.'],
+  street_sign_density: ['Speed signs', 'Scales signs on roads with a mapped limit that matches an installed sign tile.'],
+  street_postboxes:    ['Public postboxes', 'Places collection boxes mapped in OpenStreetMap.'],
+  street_kiosks:       ['Street kiosks', 'Places kiosks mapped as points outside buildings.'],
+  street_litter_density: ['Street litter', 'Scales loose rubbish scattered on sidewalks.'],
+  house_mailbox_density: ['Mailboxes at houses', 'Share of eligible private house paths that get a mailbox at the street end.'],
+  yard_bin_density:    ['Household bins', 'Scales bins near driveways, paths and behind houses.'],
+  workyard_prop_density: ['Works yard objects', 'Scales stacks of crates, pallets and similar objects, and dumpsters around industrial buildings.'],
+  parking_density:     ['Car parks', 'Enables more marked bays for vehicle spawning. The game’s Car Spawn Rate sets their chance of filling. Painted bays remain visible at zero.'],
+  vehicle_yard_density: ['Yards and driveways', 'Scales vehicle spawn places on driveways and in yards.'],
+  vehicle_kerb_density: ['Roadside parking', 'Scales vehicle spawn places found along the edges of roads.'],
+  vehicle_jam_density: ['Highway pileups', 'Scales traffic jam zones on major roads outside built-up areas. The game’s Traffic Jams option enables them.'],
   basement_share:      ['Basements', 'The share of houses with a basement. Schools, hospitals, police stations and the like always get one.'],
   max_basement_depth:  ['Deepest basement', 'Levels a military base may go down, up to 32. 0 builds no basements at all.'],
   landcover:           ['Land cover', 'WorldCover fills ground OpenStreetMap leaves blank with what is really there: woods, scrub, meadow, fields, marsh, rock. Its data downloads once per area. OpenStreetMap only leaves that ground as grass with scattered made-up woods.'],
@@ -91,7 +109,6 @@ const SETTING_GROUPS = {
     main: ['zombies_per_resident', 'spawn_density', 'guaranteed_rifle'],
     advanced: [
       ['Zombies', ['m2_per_person']],
-      ['Vehicles', ['parking_density']],
     ],
   },
   roads: {
@@ -99,6 +116,20 @@ const SETTING_GROUPS = {
     main: ['true_map', 'straight_roads', 'align_streets'],
     advanced: [
       ['Layout', ['rotate_degrees', 'include_proposed_roads', 'seed']],
+    ],
+  },
+  street: {
+    title: 'Street detail',
+    main: [],
+    sections: [
+      ['Lighting and poles', ['street_lamp_mode', 'street_lamp_density', 'street_pole_density']],
+      ['Public bins', ['street_bin_mode', 'street_bin_density']],
+      ['Vehicles', ['parking_density', 'vehicle_yard_density', 'vehicle_kerb_density', 'vehicle_jam_density']],
+    ],
+    advanced: [
+      ['Sidewalks and signs', ['street_verge_scope', 'street_bench_density', 'street_hydrant_density',
+                               'street_sign_density', 'street_postboxes', 'street_kiosks', 'street_litter_density']],
+      ['Houses and works yards', ['house_mailbox_density', 'yard_bin_density', 'workyard_prop_density']],
     ],
   },
   buildings: {
@@ -141,7 +172,7 @@ const SETTING_GROUPS = {
 const NOT_IN_PREVIEW = new Set(['forest_groves', 'forest_wild_growth']);
 
 function groupKeys(group) {
-  return [...group.main, ...group.advanced.flatMap(([, keys]) => keys)];
+  return [...group.main, ...[...(group.sections || []), ...group.advanced].flatMap(([, keys]) => keys)];
 }
 
 // A tooltip opened with a tap closes at a tap anywhere else: a browser that
@@ -319,6 +350,14 @@ function settingGroup(name, group, values) {
   // Nothing of the generator's in it, nothing to reset.
   if (!groupKeys(group).length) card.querySelector('.group-reset').hidden = true;
   group.main.forEach(key => add(card, key));
+  const addSection = (parent, title, keys) => {
+    const head = document.createElement('div');
+    head.className = 'setting-subhead';
+    head.textContent = title;
+    parent.appendChild(head);
+    keys.forEach(key => add(parent, key));
+  };
+  for (const [title, keys] of group.sections || []) addSection(card, title, keys);
   const end = group.partEnd && document.querySelector(`.tab-part[data-part="${group.partEnd}"]`);
   if (end) card.appendChild(end);
   const advanced = document.createElement('details');
@@ -327,11 +366,7 @@ function settingGroup(name, group, values) {
     .filter(key => key in settingsMeta.defaults && SETTING_LABELS[key]).length;
   advanced.innerHTML = `<summary><span>Advanced</span><span class="adv-count">${many}</span></summary>`;
   for (const [title, keys] of group.advanced) {
-    const head = document.createElement('div');
-    head.className = 'setting-subhead';
-    head.textContent = title;
-    advanced.appendChild(head);
-    keys.forEach(key => add(advanced, key));
+    addSection(advanced, title, keys);
   }
   // Open or closed is remembered in this browser; a private window that
   // refuses storage just starts closed.

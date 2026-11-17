@@ -12,17 +12,21 @@ import re
 import unittest
 
 import app
-from knoxbuild.settings import Settings
+from knoxbuild.settings import STREET_RENDER_KEYS, Settings
 from web.generation import _generate
 
 
-def _generate_source() -> str:
+def _generate_settings() -> set[str]:
     """The function that really reads the settings.
 
     The route `generate` only unwraps the request body and hands it to
     `_generate`; every knob is read in there.
     """
-    return inspect.getsource(_generate)
+    source = inspect.getsource(_generate)
+    read = settings_read_by(source)
+    if re.search(r"\bstreet_settings\s*=\s*settings\b", source):
+        read.update(STREET_RENDER_KEYS)
+    return read
 
 
 # Read by generate() and deliberately not in the list: the renderer draws a
@@ -52,12 +56,12 @@ class RenderSettings(unittest.TestCase):
         self.assertEqual(len(app.RENDER_SETTINGS), len(set(app.RENDER_SETTINGS)))
 
     def test_generate_reads_all_of_them(self):
-        read = settings_read_by(_generate_source())
+        read = _generate_settings()
         self.assertEqual([k for k in app.RENDER_SETTINGS if k not in read], [],
                          "listed as needing a redraw but generate() never reads it")
 
     def test_nothing_generate_reads_is_left_out(self):
-        read = settings_read_by(_generate_source())
+        read = _generate_settings()
         missed = read - set(app.RENDER_SETTINGS) - REDRAWN_BY_THE_BUILD
         self.assertEqual(sorted(missed), [],
                          "generate() reads these, so changing one has to redraw "

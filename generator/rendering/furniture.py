@@ -2,11 +2,17 @@
 from __future__ import annotations
 
 import os
+import random
+from collections import defaultdict
 
 from PIL import Image, ImageFilter
 
+from knoxbuild.settings import DEFAULT_STREET_SETTINGS, StreetSettings
+
 from .. import pz_colors as C
 from ..osm import ROAD_HIERARCHY_BY_CODE
+from .geometry import _draw_roads, _is_polygon, _pixel_width
+from .widths import _way_width_m
 
 
 # How often the vanilla streets have each, measured on their squares
@@ -24,21 +30,18 @@ EDGE_LINE_MIN_RUN = 6
 CRACK_SHARE = 0.012
 LITTER_SHARE = 0.002
 LAMP_EVERY = 18
-# A hydrant, a bin or a mailbox only stands where there is something for it to
-# serve: within this many tiles of a building. Out on open road they were
-# street furniture for nobody.
+# Hydrants and benches only stand where there is a building to serve.
 NEAR_BUILDING_TILES = 12
 # A speed limit sign every so many tiles along a main street's kerb (Erika's
-# Tiles only), with the limit going by how wide the carriageway is.
+# Tiles only). The available signs display miles per hour.
 SPEED_SIGN_EVERY = 80
-SPEED_BY_WIDTH = ((12, 45), (8, 35), (0, 25))
-BIN_EVERY = 28
-MAILBOX_EVERY = 34
-# Street furniture besides the essentials: a bench, the news kiosk, the blue
-# collection box. A bench is two squares long and needs both free.
+SPEED_LIMITS = {f"{limit} mph": limit for limit, _ in C.SPEED_SIGNS}
+LIT, UNLIT = 64, 128
+ROAD_LIGHTING = {"yes": LIT, "no": UNLIT}
+HYDRANT_EVERY = 38
+DRAIN_EVERY = 24
+# A bench is two squares long and needs both free.
 BENCH_EVERY = 110
-KIOSK_EVERY = 150
-POSTBOX_EVERY = 190
 # A manhole cover on the pavement, one square in a few hundred.
 MANHOLE_SHARE = 0.003
 # Which way a prop on each kerb faces. The tools' orient is the direction an
@@ -59,15 +62,172 @@ UTILITY_POLE_EVERY = {
     "service": 90, "footway": 1 << 30,
 }
 ROAD_FURNITURE_INTERVALS = {
-    "motorway": {"lamp": 55, "hydrant": 1 << 30, "speed": 55, "drain": 40, "bin": 1 << 30, "mailbox": 1 << 30},
-    "trunk": {"lamp": 36, "hydrant": 80, "speed": 65, "drain": 32, "bin": 1 << 30, "mailbox": 1 << 30},
-    "primary": {"lamp": 20, "hydrant": 42, "speed": 75, "drain": 24, "bin": 24, "mailbox": 42},
-    "secondary": {"lamp": 18, "hydrant": 38, "speed": 85, "drain": 24, "bin": 26, "mailbox": 38},
-    "tertiary": {"lamp": 16, "hydrant": 35, "speed": 100, "drain": 24, "bin": 28, "mailbox": 34},
-    "residential": {"lamp": 14, "hydrant": 32, "speed": 120, "drain": 24, "bin": 28, "mailbox": 30},
-    "service": {"lamp": 30, "hydrant": 75, "speed": 1 << 30, "drain": 34, "bin": 36, "mailbox": 1 << 30},
-    "footway": {"lamp": 22, "hydrant": 1 << 30, "speed": 1 << 30, "drain": 1 << 30, "bin": 28, "mailbox": 1 << 30},
+    "motorway": {"lamp": 55, "hydrant": 1 << 30, "speed": 55, "drain": 40},
+    "trunk": {"lamp": 36, "hydrant": 80, "speed": 65, "drain": 32},
+    "primary": {"lamp": 20, "hydrant": 42, "speed": 75, "drain": 24},
+    "secondary": {"lamp": 18, "hydrant": 38, "speed": 85, "drain": 24},
+    "tertiary": {"lamp": 16, "hydrant": 35, "speed": 100, "drain": 24},
+    "residential": {"lamp": 14, "hydrant": 32, "speed": 120, "drain": 24},
+    "service": {"lamp": 30, "hydrant": 75, "speed": 1 << 30, "drain": 34},
+    "footway": {"lamp": 22, "hydrant": 1 << 30, "speed": 1 << 30, "drain": 1 << 30},
 }
+
+SNAP_OFFSETS = sorted(
+    ((dx, dy) for dx in range(-3, 4) for dy in range(-3, 4) if dx * dx + dy * dy <= 9),
+    key=lambda offset: offset[0] ** 2 + offset[1] ** 2,
+)
+ROAD_OFFSETS = sorted(
+    ((dx, dy) for dx in range(-6, 7) for dy in range(-6, 7) if 0 < dx * dx + dy * dy <= 36),
+    key=lambda offset: offset[0] ** 2 + offset[1] ** 2,
+)
+FURNITURE_CLEARANCE = 12
+MAPPED_PROPS = {
+    ("highway", "street_lamp"): "lamp",
+    ("amenity", "waste_basket"): "bin",
+    ("amenity", "post_box"): "postbox",
+    ("shop", "kiosk"): "kiosk",
+}
+
+
+def sample_fixture(density: float, key: int) -> bool:
+    """Thin contextual candidates without shifting another pass's random stream."""
+    return density >= 1.0 or (density > 0.0 and random.Random(key).random() < density)
+
+
+def _scaled_interval(interval: int, density: float) -> int:
+    if not density or interval >= (1 << 29):
+        return 1 << 30
+    return max(1, round(interval / density))
+
+
+def _road_furniture_mask(buckets, proj, ground_rings, *, crisp=False):
+    """Pack a way's explicit lighting and supported speed into its road tiles."""
+    mask = None
+    for category in ("road_service", "road_minor", "road_medium", "road_major"):
+        strokes = defaultdict(list)
+        for feat in buckets.get(category, ()):
+            if _is_polygon(feat):
+                continue
+            tags = feat.tags
+            speed = SPEED_LIMITS.get(tags.get("maxspeed", "").strip().lower(), 0)
+            if any(key.startswith("maxspeed:") and key not in {"maxspeed:type", "maxspeed:source"}
+                   for key in tags):
+                speed = 0
+            code = ROAD_LIGHTING.get(tags.get("lit"), 0) | speed
+            if code:
+                width = _pixel_width(_way_width_m(feat, category), proj.meters_per_tile)
+                strokes[code].append((width, ground_rings(feat)))
+        if strokes and mask is None:
+            mask = Image.new("L", (proj.width, proj.height))
+        for code, lines in sorted(strokes.items()):
+            _draw_roads(mask, lines, code, crisp=crisp)
+    return mask
+
+
+def _osm_furniture(features):
+    """Read mapped props and public places that can use a bin."""
+    for feat in features:
+        if feat.kind != "node" or not feat.geometry:
+            continue
+        tags = feat.tags
+        if tags.get("location") == "underground" or tags.get("indoor") == "yes":
+            continue
+        for (key, value), kind in MAPPED_PROPS.items():
+            if tags.get(key) == value:
+                yield kind, feat
+        if tags.get("highway") == "bus_stop" or (
+                tags.get("public_transport") == "platform" and tags.get("bus") == "yes"):
+            yield "stop bin", feat
+
+
+def _paint_osm_furniture(out, empty, roadside, pavement, asphalt,
+                         buildings, features, proj, clip, counts, settings):
+    """Place OSM nodes on nearby free ground and index the bins and lamps."""
+    h, w = empty.shape
+    placed = {"lamp": defaultdict(list), "bin": defaultdict(list)}
+    distance = FURNITURE_CLEARANCE
+
+    def near(kind, x, y):
+        cells = placed[kind]
+        return bool(cells) and any(
+            (x - px) ** 2 + (y - py) ** 2 < distance ** 2
+            for cy in range(y // distance - 1, y // distance + 2)
+            for cx in range(x // distance - 1, x // distance + 2)
+            for px, py in cells.get((cx, cy), ()))
+
+    if proj is None:
+        return near
+    if clip is not None:
+        from shapely.geometry import Point
+
+    def room_at_stop(x, y):
+        xs = [nx for nx in (x - 1, x + 1) if 0 <= nx < w and pavement[y, nx]]
+        ys = [ny for ny in (y - 1, y + 1) if 0 <= ny < h and pavement[ny, x]]
+        if pavement[y, x]:
+            # Leave room to go around the bin on the same paved surface.
+            return any(pavement[ny, nx] for nx in xs for ny in ys)
+        return roadside[y, x] and bool(xs or ys)
+
+    # Explicit objects take priority when an inferred stop bin needs a tile.
+    props = sorted(_osm_furniture(features),
+                   key=lambda item: (item[0] == "stop bin", item[1].osm_id))
+    colours = {}
+    if settings.street_lamp_mode != "off":
+        colours["lamp"] = {f: getattr(C, f"LAMP_{f}") for f in FACES_THE_ROAD.values()}
+    for kind, label, enabled in (("kiosk", "Kiosk N", settings.street_kiosks),
+                                 ("postbox", "Postbox N", settings.street_postboxes)):
+        if enabled and any(prop == kind for prop, _ in props) and _rule_ready(label):
+            colours[kind] = {f: getattr(C, f"{kind.upper()}_{f}") for f in FACES_THE_ROAD.values()}
+
+    for what, feat in props:
+        if what == "stop bin":
+            if settings.street_bin_mode != "context" or not sample_fixture(
+                    settings.street_bin_density, feat.osm_id):
+                continue
+        elif what == "bin":
+            if settings.street_bin_mode == "off":
+                continue
+        elif what not in colours:
+            continue
+        ax, ay = proj.to_px(*feat.geometry[0])
+        x, y = round(ax), round(ay)
+        if not (0 <= x < w and 0 <= y < h):
+            continue
+        if ((buildings is not None and buildings[y, x])
+                or (clip is not None and not clip.covers(Point(ax, ay)))):
+            continue
+        if what == "stop bin" and near("bin", x, y):
+            continue
+        for dx, dy in SNAP_OFFSETS:
+            px, py = x + dx, y + dy
+            if not (0 <= px < w and 0 <= py < h and empty[py, px]):
+                continue
+            if ((buildings is not None and buildings[py, px])
+                    or (clip is not None and not clip.covers(Point(px, py)))):
+                continue
+            if what == "stop bin":
+                if not room_at_stop(px, py) or near("bin", px, py):
+                    continue
+            elif not (roadside[py, px] or pavement[py, px]):
+                continue
+            kind = "bin" if what == "stop bin" else what
+            colour = C.BIN
+            if kind != "bin":
+                facing = "S"
+                for rx, ry in ROAD_OFFSETS:
+                    nx, ny = px + rx, py + ry
+                    if 0 <= nx < w and 0 <= ny < h and asphalt[ny, nx]:
+                        facing = (("W" if rx < 0 else "E") if abs(rx) >= abs(ry)
+                                  else ("N" if ry < 0 else "S"))
+                        break
+                colour = colours[kind][facing]
+            out[py, px] = colour
+            empty[py, px] = False
+            counts[kind] = counts.get(kind, 0) + 1
+            if kind in placed:
+                placed[kind][px // distance, py // distance].append((px, py))
+            break
+    return near
 
 
 def _rule_ready(label: str) -> bool:
@@ -102,8 +262,6 @@ def _mod_tiles_ready() -> bool:
         return "KnoxMap road Speed limit 25 S" in rules.read_text(encoding="utf-8", errors="replace")
     except Exception:      # noqa: BLE001 - no tools, no mod tiles
         return False
-HYDRANT_EVERY = 38
-DRAIN_EVERY = 24
 
 
 def _long_runs(mask, min_len: int, axis: int):
@@ -134,7 +292,10 @@ def _long_runs(mask, min_len: int, axis: int):
 
 def _paint_street_furniture(veg: Image.Image, landscape: Image.Image,
                             road_hierarchy: Image.Image | None = None,
-                            buildings: Image.Image | None = None) -> dict:
+                            buildings: Image.Image | None = None, *,
+                            road_furniture: Image.Image | None = None,
+                            features=(), proj=None, clip=None,
+                            settings: StreetSettings = DEFAULT_STREET_SETTINGS) -> dict:
     """Lamps, hydrants and drains along the kerbs; grime, cracks and litter.
 
     A generated street was clean tarmac, kerb and pavement and nothing else;
@@ -151,6 +312,7 @@ def _paint_street_furniture(veg: Image.Image, landscape: Image.Image,
     h, w = ground.shape[:2]
     road_classes = (np.asarray(road_hierarchy.convert("L"))
                     if road_hierarchy is not None else None)
+    road_tags = np.asarray(road_furniture) if road_furniture is not None else None
 
     def is_colour(arr, colours):
         mask = np.zeros(arr.shape[:2], dtype=bool)
@@ -166,17 +328,16 @@ def _paint_street_furniture(veg: Image.Image, landscape: Image.Image,
     roadside = is_colour(
         ground, (C.DARK_GRASS, C.MEDIUM_GRASS, C.LIGHT_GRASS, C.PAVING,
                  C.DIRT_ROWS_H, C.DIRT_ROWS_V))
-    # Hydrants, bins and mailboxes stand on the grass or paving beside the
-    # sidewalk, never on the sidewalk itself, and only where there is a
-    # building to serve: down an open stretch of road they were furniture for
-    # nobody.
+    # Hydrants and benches stand on the grass or paving beside the sidewalk.
     verge = is_colour(ground, (C.DARK_GRASS, C.MEDIUM_GRASS, C.LIGHT_GRASS,
                                C.PAVING))
     near_buildings = None
+    building_tiles = None
     if buildings is not None:
         from . import native_pixels
 
         mask = buildings if buildings.mode == "L" else buildings.convert("L")
+        building_tiles = np.asarray(mask)
         mw, mh = mask.size
         raw = native_pixels.box_any(mask.tobytes(), mw, mh, NEAR_BUILDING_TILES)
         if raw is not None:
@@ -245,28 +406,32 @@ def _paint_street_furniture(veg: Image.Image, landscape: Image.Image,
                 (C.EDGE_LINE_N, (0, -1), C.LAMP_S), (C.EDGE_LINE_S, (0, 1), C.LAMP_N)]
     taken: dict[str, set] = {
         "lamp": set(), "hydrant": set(), "drain": set(), "speed": set(),
-        "bin": set(), "mailbox": set(), "pole": set(), "bench": set(),
-        "kiosk": set(), "postbox": set(),
+        "pole": set(), "bench": set(),
     }
     pole = C.UTILITY_POLE if _rule_ready("Utility pole") else None
-    # The kiosk and the collection box face out from the pavement, across the
-    # road they stand beside.
-    kiosk = None if not _rule_ready("Kiosk N") else {
-        "N": C.KIOSK_N, "E": C.KIOSK_E, "S": C.KIOSK_S, "W": C.KIOSK_W}
-    postbox = None if not _rule_ready("Postbox N") else {
-        "N": C.POSTBOX_N, "E": C.POSTBOX_E, "S": C.POSTBOX_S, "W": C.POSTBOX_W}
     out = vp.copy()
+    near_osm_prop = _paint_osm_furniture(
+        out, empty, roadside, pavement, asphalt, building_tiles, features, proj, clip,
+        counts, settings)
     # Speed signs stand where drivers keeping right see their faces: on the
     # east kerb of a north-south road facing south, the north kerb of an
     # east-west one facing east. Erika's signs only face those two ways.
-    speed_side = {C.EDGE_LINE_E: "S", C.EDGE_LINE_N: "E"} if _mod_tiles_ready() else {}
-
-    def carriageway(gx, gy, sx, sy):
-        n = 0
-        while n < 24 and 0 <= gx - n * sx < w and 0 <= gy - n * sy < h \
-                and asphalt[gy - n * sy, gx - n * sx]:
-            n += 1
-        return n
+    speed_side = ({C.EDGE_LINE_E: "S", C.EDGE_LINE_N: "E"}
+                  if road_tags is not None and settings.street_sign_density and _mod_tiles_ready() else {})
+    lamp_density = settings.street_lamp_density if settings.street_lamp_mode == "context" else 0.0
+    intervals = {}
+    for hierarchy in (None, *ROAD_FURNITURE_INTERVALS):
+        spacing = ROAD_FURNITURE_INTERVALS.get(hierarchy, {})
+        lamp_every = spacing.get("lamp", LAMP_EVERY)
+        intervals[hierarchy] = (
+            _scaled_interval(lamp_every, lamp_density),
+            _scaled_interval(2 * lamp_every, lamp_density),
+            _scaled_interval(spacing.get("speed", SPEED_SIGN_EVERY), settings.street_sign_density),
+            _scaled_interval(spacing.get("hydrant", HYDRANT_EVERY), settings.street_hydrant_density),
+            _scaled_interval(UTILITY_POLE_EVERY.get(hierarchy, 55), settings.street_pole_density),
+            spacing.get("drain", DRAIN_EVERY),
+        )
+    verge_buildings = near_buildings if settings.street_verge_scope == "built_up" else None
 
     def hierarchy_at(gx, gy, sx, sy):
         if road_classes is None:
@@ -319,50 +484,48 @@ def _paint_street_furniture(veg: Image.Image, landscape: Image.Image,
             if not (0 <= bx < w and 0 <= by < h):
                 continue
             hierarchy = hierarchy_at(gx, gy, sx, sy)
-            spacing = ROAD_FURNITURE_INTERVALS.get(hierarchy, {})
+            lit_every, fallback_every, speed_every, hydrant_every, pole_every, drain_every = intervals[hierarchy]
             facing = speed_side.get(edge)
-            speed = None
-            if facing:
-                across = carriageway(gx, gy, sx, sy)
-                limit = next(v for width, v in SPEED_BY_WIDTH if across >= width)
-                speed = C.SPEED_SIGNS[(limit, facing)]
-            for what, every, colour, at, partner in (
-                    ("speed", spacing.get("speed", SPEED_SIGN_EVERY), speed, (bx, by), None),
-                    ("lamp", spacing.get("lamp", LAMP_EVERY), lamp, (bx, by), None),
-                    ("hydrant", spacing.get("hydrant", HYDRANT_EVERY), C.HYDRANT, (bx, by), None),
-                    ("bin", spacing.get("bin", BIN_EVERY), C.BIN, (bx, by), None),
-                    ("mailbox", spacing.get("mailbox", MAILBOX_EVERY), C.MAILBOX, (bx, by), None),
-                    ("kiosk", KIOSK_EVERY,
-                     kiosk.get(FACES_THE_ROAD[edge]) if kiosk else None, (bx, by), None),
-                    ("postbox", POSTBOX_EVERY,
-                     postbox.get(FACES_THE_ROAD[edge]) if postbox else None, (bx, by), None),
+            tags = int(road_tags[gy, gx]) if road_tags is not None else 0
+            speed = C.SPEED_SIGNS.get((tags & (LIT - 1), facing))
+            for what, every, colour, at in (
+                    ("speed", speed_every, speed, (bx, by)),
+                    ("lamp", lit_every if tags & LIT else fallback_every,
+                     None if tags & UNLIT else lamp, (bx, by)),
+                    ("hydrant", hydrant_every, C.HYDRANT, (bx, by)),
                     # Last of the verge props, so a lamp or a hydrant that is
                     # due on the same square keeps it: the poles fall in the
                     # gaps between them, as they do along a real street.
-                    ("pole", UTILITY_POLE_EVERY.get(hierarchy, 55), pole, (bx, by), None),
-                    ("drain", spacing.get("drain", DRAIN_EVERY), C.STORM_DRAIN, (gx, gy), None)):
-                if every >= (1 << 29):
+                    ("pole", pole_every, pole, (bx, by)),
+                    ("drain", drain_every, C.STORM_DRAIN, (gx, gy))):
+                if colour is None or every >= (1 << 29):
                     continue
                 px, py = at
-                if what in ("hydrant", "bin", "mailbox", "kiosk", "postbox"):
+                if what == "hydrant":
                     spot = beside_the_pavement(gx, gy, sx, sy)
                     if spot is None:
                         continue
                     px, py = spot
-                    if near_buildings is not None and not near_buildings[py, px]:
+                    if verge_buildings is not None and not verge_buildings[py, px]:
                         continue
                 elif what in ("speed", "lamp", "pole"):
                     spot = off_the_pavement(gx, gy, sx, sy)
                     if spot is None:
                         continue
                     px, py = spot
-                if colour is None or not (0 <= px < w and 0 <= py < h):
+                if not (0 <= px < w and 0 <= py < h):
                     continue
                 # Speed signs keep a spacing per facing: the north-south roads,
                 # met first, took every cell and left east-west ones none.
                 cell = (px // every, py // every, facing if what == "speed" else None)
                 if cell in taken[what]:
                     continue
+                if what == "lamp":
+                    if (not tags & LIT and near_buildings is not None
+                            and not near_buildings[py, px]):
+                        continue
+                    if near_osm_prop("lamp", px, py):
+                        continue
                 # A drain takes the gutter square from its edge line; other
                 # props need an empty sidewalk or verge tile, not a road or lot.
                 if what == "drain" and not np.array_equal(vp[py, px], edge):
@@ -370,14 +533,6 @@ def _paint_street_furniture(veg: Image.Image, landscape: Image.Image,
                 if what != "drain" and (not empty[py, px] or driveable[py, px]
                                          or not roadside[py, px]):
                     continue
-                if partner is not None:
-                    p_colour, (px2, py2) = partner
-                    if not (0 <= px2 < w and 0 <= py2 < h) \
-                            or not empty[py2, px2] or driveable[py2, px2] \
-                            or not roadside[py2, px2]:
-                        continue
-                    out[py2, px2] = p_colour
-                    empty[py2, px2] = False
                 taken[what].add(cell)
                 out[py, px] = colour
                 empty[py, px] = False
@@ -400,7 +555,7 @@ def _paint_street_furniture(veg: Image.Image, landscape: Image.Image,
     # of the roll, so no square gets two.
     roll = rng.random((h, w))
     scattered = [(asphalt, CRACK_SHARE, C.ASPHALT_CRACKS, "cracks"),
-                 (pavement, LITTER_SHARE, C.LITTER, "litter")]
+                 (pavement, LITTER_SHARE * settings.street_litter_density, C.LITTER, "litter")]
     if _rule_ready("Manhole cover"):
         from . import native_pixels
 
@@ -421,7 +576,8 @@ def _paint_street_furniture(veg: Image.Image, landscape: Image.Image,
     # Benches: three squares along the kerb with the seat facing the road. They
     # need the whole run free, so they take a pass of their own rather than a
     # square in the props loop.
-    if _rule_ready("Bench Y0"):
+    if settings.street_bench_density and _rule_ready("Bench Y0"):
+        bench_every = _scaled_interval(BENCH_EVERY, settings.street_bench_density)
         for edge, (sx, sy), _lamp in straight:
             tiles, along_y = BENCH_RUNS[edge]
             dx, dy = (0, 1) if along_y else (1, 0)
@@ -444,9 +600,9 @@ def _paint_street_furniture(veg: Image.Image, landscape: Image.Image,
                 if spot is None:
                     continue
                 px, py = spot
-                if near_buildings is not None and not near_buildings[py, px]:
+                if verge_buildings is not None and not verge_buildings[py, px]:
                     continue
-                cell = (px // BENCH_EVERY, py // BENCH_EVERY)
+                cell = (px // bench_every, py // bench_every)
                 if cell in taken["bench"]:
                     continue
                 run = [(px + k * dx, py + k * dy) for k in range(len(tiles))]

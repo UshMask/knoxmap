@@ -456,6 +456,9 @@ OVERPASS_FILTERS: Sequence[str] = (
     # Mapped as points inside the building far more often than as the
     # building's own tags (knoxbuild/uses.py).
     'node["shop"]',
+    'node["highway"~"^(street_lamp|bus_stop)$"]',
+    'node["public_transport"="platform"]["bus"="yes"]',
+    'node["amenity"~"^(post_box|waste_basket)$"]',
     'node["amenity"~"^(restaurant|fast_food|food_court|cafe|ice_cream|bar|pub|nightclub|'
     'biergarten|bank|bureau_de_change|post_office|pharmacy|dentist|doctors|clinic|'
     'veterinary|library|cinema|theatre|arts_centre|police|childcare|kindergarten|fuel|car_repair)$"]',
@@ -490,7 +493,7 @@ OVERPASS_FILTERS: Sequence[str] = (
 
 # Bumped whenever the filters above change, so a cached download made with
 # the old list is fetched again instead of silently lacking the new features.
-FILTERS_VERSION = 17
+FILTERS_VERSION = 18
 
 
 @dataclass

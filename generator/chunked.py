@@ -23,6 +23,7 @@ from PIL import Image
 
 import knoxfiles
 import knoxstop
+from knoxbuild.settings import DEFAULT_STREET_SETTINGS, STREET_RENDER_KEYS, StreetSettings
 
 from . import pz_colors as C
 from .osm import OSMFeature, classify
@@ -174,6 +175,7 @@ def render_chunked(
     forest_stand_m: float = 60,
     forest_edge_m: float = 30,
     forest_params=None,
+    street_settings: StreetSettings = DEFAULT_STREET_SETTINGS,
     rotation: float = 0.0,
     osm_cache: str | None = None,
     osm_bbox: tuple[float, float, float, float] | None = None,
@@ -256,6 +258,7 @@ def render_chunked(
         "chunk_cells": chunk_cells, "halo_tiles": halo_tiles,
         "meters_per_tile": float(meters_per_tile), "rotation": float(rotation),
         "road_layout": road_layout, "terrain_only": int(terrain_only or 0),
+        "street_furniture": {key: getattr(street_settings, key) for key in STREET_RENDER_KEYS},
         "spawn_density": int(spawn_density),
         "tree_density": float(tree_density),
         "forest_density": float(forest_density),
@@ -379,6 +382,7 @@ def render_chunked(
                         tree_density=tree_density,
                         forest_density=forest_density,
                         forest_params=fp,
+                        street_settings=street_settings,
                         rotation=rotation,
                         shape=shape,
                         straight_roads=road_layout,

@@ -7,12 +7,35 @@ import numpy as np
 from PIL import Image
 
 from generator import pz_colors as C
+from generator.osm import ROAD_HIERARCHY_CODES
 from knoxbuild.world import render_pzw
 from knoxbuild.zones_detect import _detect_zones
 from tools.make_map_mod import write_objects
 
 
 class ForageAndNavZoneTests(unittest.TestCase):
+    def test_road_story_zones_follow_straight_carriageways(self):
+        land = np.full((140, 120, 3), C.MEDIUM_GRASS, dtype=np.uint8)
+        ranks = np.zeros(land.shape[:2], dtype=np.uint8)
+        for region, tier in (
+            (np.s_[10:19, :120], "residential"),
+            (np.s_[50:130, 10:18], "secondary"),
+            (np.s_[70:78, 30:110], "footway"),
+        ):
+            land[region] = C.MEDIUM_ASPHALT
+            ranks[region] = ROAD_HIERARCHY_CODES[tier]
+
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "land.bmp")
+            Image.fromarray(land, "RGB").save(path)
+            zones = _detect_zones(path, [], road_hierarchy=ranks,
+                                  keep_clear=[(45, 8, 30, 12)])
+
+        stories = [(z.tile_x, z.tile_y, z.width, z.height) for z in zones
+                   if z.kind == "Nav" and min(z.width, z.height) < 15
+                   and max(z.width, z.height) > 30]
+        self.assertEqual(stories, [(0, 10, 40, 9), (80, 10, 40, 9), (10, 60, 8, 40)])
+
     def test_detects_all_forage_and_nav_zone_kinds(self):
         w, h = 100, 100
         land = np.full((h, w, 3), C.MEDIUM_GRASS, dtype=np.uint8)

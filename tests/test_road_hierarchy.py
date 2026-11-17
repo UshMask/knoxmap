@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -9,6 +10,8 @@ from PIL import Image
 from generator import osm, renderer, structures
 from knoxbuild import build as building
 from knoxbuild.context import Context
+from knoxbuild.world import render_pzw
+from tools.make_map_mod import write_objects
 
 
 class RoadHierarchyTests(unittest.TestCase):
@@ -267,9 +270,17 @@ class RoadHierarchyTests(unittest.TestCase):
             zones = building._detect_zones(
                 path, [], settings=SimpleNamespace(parking_density=1.0),
                 road_hierarchy=primary)
-        stalls = [z for z in zones if z.kind == "ParkingStall"]
-        interior = [z for z in stalls if 22 <= z.tile_y <= 28]
-        self.assertGreaterEqual(len(interior), 2)
+            jams = [z for z in zones if z.name]
+            self.assertGreaterEqual(len(jams), 2)
+            self.assertTrue(all(z.kind == "ParkingStall" and z.name == "trafficjame"
+                                and (z.width, z.height) == (24, 3)
+                                and 20 <= z.tile_y <= z.tile_y + z.height <= 32 for z in jams))
+            project = Path(directory)
+            (project / "road.pzw").write_text(
+                render_pzw(2, 1, "ground.bmp", [], zones=zones), encoding="utf-8")
+            write_objects(directory, directory)
+            exported = (project / "objects.lua").read_text(encoding="utf-8")
+            self.assertEqual(exported.count('name = "trafficjame", type = "ParkingStall"'), len(jams))
 
 
 if __name__ == "__main__":

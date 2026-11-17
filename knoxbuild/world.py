@@ -176,6 +176,7 @@ class Zone:
     tile_y: int
     width: int
     height: int
+    name: str = ""
 
     @property
     def cell_x(self) -> int:
@@ -367,7 +368,7 @@ def render_pzw(cells_x: int, cells_y: int, bmp_name: str,
                 f' map={quoteattr(p.tbx_path)}/>')
         for z in zones_by_cell.get((cx, cy), []):
             out.append(
-                f'  <object name="" group={quoteattr(z.kind)}'
+                f'  <object name={quoteattr(z.name)} group={quoteattr(z.kind)}'
                 f' type={quoteattr(z.kind)}'
                 f' x="{z.offset_x}" y="{z.offset_y}" level="0"'
                 f' width="{z.width}" height="{z.height}"/>')

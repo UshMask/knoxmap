@@ -6,6 +6,7 @@ from __future__ import annotations
 import sys
 
 import knoxlog
+from knoxbuild.settings import STREET_RENDER_KEYS
 
 
 # Where a map stops being an easy one. None of these refuses anything: they
@@ -193,6 +194,7 @@ RENDER_SETTINGS = ["align_streets", "rotate_degrees", "straight_roads", "include
                    "forest_groves", "forest_wild_growth", "forest_shrubland",
                    "fill_gaps", "fill_frontage",
                    "terrain_only",
+                   *STREET_RENDER_KEYS,
                    # Enrichment layers (knoxdata/): they colour the ground and
                    # tag buildings, so changing one redraws the map.
                    "landcover", "elevation", "max_relief", "ne_context",

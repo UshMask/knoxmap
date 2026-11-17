@@ -184,8 +184,14 @@ class QueryFilters(unittest.TestCase):
         # 14: gate nodes, so a fence has a way through it.
         # 15: address interpolation lines, so their ends are not houses.
         # 16: entrance nodes, for the door a building is entered by.
-        # 17: silos and grain elevators, and transmission towers.
-        self.assertEqual(osm.FILTERS_VERSION, 17)
+
+    def test_fetches_street_furniture_and_bus_stops(self):
+        query = osm._build_query(*BOX)
+        for selector in ('node["highway"~"^(street_lamp|bus_stop)$"]',
+                         'node["public_transport"="platform"]["bus"="yes"]',
+                         'node["amenity"~"^(post_box|waste_basket)$"]'):
+            self.assertIn(selector, query)
+        self.assertGreaterEqual(osm.FILTERS_VERSION, 18)
 
     def test_fetches_the_gates_on_a_fence(self):
         # A fence is drawn as one line with the gate as a node on it, so

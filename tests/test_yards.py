@@ -9,6 +9,7 @@ from PIL import Image
 from generator import pz_colors as C
 from knoxbuild import yards as yards_module
 from knoxbuild.bitmaps import read_rgb
+from knoxbuild.settings import DEFAULT, Settings
 from knoxbuild.yards import YARD_MIN_DEPTH, _pave_patio, paint_paths, yard_plan
 
 
@@ -42,7 +43,7 @@ def _building(folder, name, door=(3, 0, "N")):
                 f'<object type="door" x="{door[0]}" y="{door[1]}" dir="{door[2]}"/></floor></building>')
 
 
-def _paint(width, height, buildings, water=(), veg=False, tarmac=()):
+def _paint(width, height, buildings, water=(), veg=False, tarmac=(), settings=DEFAULT):
     """Lawn with a pavement along the top two rows; return the painted ground,
     or the vegetation layer when `veg`.
 
@@ -66,7 +67,7 @@ def _paint(width, height, buildings, water=(), veg=False, tarmac=()):
             occupied[y:y + SIZE, x:x + SIZE] = True
             rows.append({"file": f"b{n}.tbx", "kind": kind, "building": "yes",
                          "tile_x": x, "tile_y": y, "width": SIZE, "height": SIZE})
-        paint_paths(out, "t", rows, occupied)
+        paint_paths(out, "t", rows, occupied, settings=settings)
         return read_rgb(os.path.join(out, "t_veg.bmp" if veg else "t.bmp"))
 
 
@@ -75,6 +76,18 @@ def _stone(ground, x, y):
 
 
 class FrontPaths(unittest.TestCase):
+    def test_only_the_house_gets_a_mailbox_at_its_front_path(self):
+        # A narrow crossing leaves a front walk and no room for a driveway.
+        water = [(x, 8) for x in range(40) if x not in (13, 29)]
+        veg = _paint(40, 32, [("house", 10, 16), ("apartment", 26, 16)], water=water, veg=True)
+        ys, xs = np.nonzero(np.all(veg == C.MAILBOX, axis=2))
+        self.assertEqual(len(xs), 1)
+        self.assertEqual(int(ys[0]), 2)
+        self.assertEqual(abs(int(xs[0]) - 13), 1)
+        disabled = _paint(40, 32, [("house", 10, 16), ("apartment", 26, 16)],
+                          water=water, veg=True, settings=Settings(house_mailbox_density=0))
+        self.assertFalse(np.any(np.all(disabled == C.MAILBOX, axis=2)))
+
     def test_a_block_of_flats_gets_a_path_to_the_pavement(self):
         ground = _paint(30, 30, [("apartment", 10, 10)])
         # Straight out of the door at (13, 9) up to the pavement at row 1.

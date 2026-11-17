@@ -15,6 +15,7 @@ import math
 from collections import deque
 
 from generator import pz_colors as C
+from generator.rendering.furniture import sample_fixture
 
 WORKS_KINDS = ("industrial",)
 YARD_MIN, YARD_MAX = 6, 10       # tiles of yard out from the walls
@@ -42,7 +43,8 @@ def yard_width(bw: int, bh: int) -> int:
     return max(YARD_MIN, min(YARD_MAX, round(math.sqrt(bw * bh) / 4)))
 
 
-def dress_works(rows: list[dict], door_lists: dict, cv, drives: list | None, rng) -> int:
+def dress_works(rows: list[dict], door_lists: dict, cv, drives: list | None, rng, *,
+                prop_density: float = 1.0, lamp_density: float = 1.0) -> int:
     """Yards for the works in `rows`. `cv` is paint_paths' canvas: ground,
     veg, w, h, free(x, y), paint(x, y, colour), paved_at, occupied_at and
     claimed_bytes. Returns the works given a yard."""
@@ -109,7 +111,8 @@ def dress_works(rows: list[dict], door_lists: dict, cv, drives: list | None, rng
         wall = [(x, y) for x, y in yard if ring(x, y) == 1]
         cx, cy = x0 + bw / 2, y0 + bh / 2
         wall.sort(key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
-        _dumpster(wall, x0, y0, bw, bh, doors, can, stand, rng)
+        if sample_fixture(prop_density, x0 + y0 * w):
+            _dumpster(wall, x0, y0, bw, bh, doors, can, stand, rng)
         i = rng.randrange(CLUTTER_EVERY)
         while i < len(wall):
             colour, (lo, hi) = rng.choice(CLUTTER)
@@ -122,13 +125,15 @@ def dress_works(rows: list[dict], door_lists: dict, cv, drives: list | None, rng
                 if run and abs(p[0] - run[-1][0]) + abs(p[1] - run[-1][1]) != 1:
                     break
                 run.append(p)
-            for p in run:
-                stand(*p, colour)
+            if sample_fixture(prop_density, wall[i][0] + wall[i][1] * w):
+                for p in run:
+                    stand(*p, colour)
             i += CLUTTER_EVERY + rng.randrange(-2, 3)
 
         # Lights at two corners of the yard, their arms over it.
         for (x, y), lamp in (((x0 - r, y0 - r), C.LAMP_S), ((x0 + bw + r - 1, y0 + bh + r - 1), C.LAMP_N)):
-            stand(x, y, lamp)
+            if sample_fixture(lamp_density, x + y * w):
+                stand(x, y, lamp)
 
         # Cars parked in front of the first door, past its step.
         if drives is not None and doors:

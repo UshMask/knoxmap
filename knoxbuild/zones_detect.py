@@ -50,9 +50,8 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
                   veg_path: str | None = None):
     """Parking stalls along the roads, town zones over built-up ground.
 
-    Without these the streets are bare: vehicles only ever spawn inside
-    ParkingStall zones, and TownZone is what marks ground as urban. Vanilla
-    Knox County ships 9694 of the former and 2715 of the latter.
+    ParkingStall zones support parked cars and pileups, while narrow Nav
+    zones support random road stories. TownZone marks built-up ground.
 
     Stalls are found by scanning the landscape bitmap for asphalt that sits on
     a road *edge* — a stall in the middle of a carriageway would block it.
@@ -60,8 +59,10 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
     import random
 
     from PIL import Image
+    from shapely import STRtree, box
 
     from generator import pz_colors as C
+    from generator.osm import ROAD_HIERARCHY_CODES
 
     from .world import Zone
 
@@ -71,6 +72,21 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
     settings = settings or Settings()
     rng = random.Random(rng_seed)
     zones: list[Zone] = []
+    lot_density = settings.parking_density
+    yard_density = getattr(settings, "vehicle_yard_density", None)
+    kerb_density = getattr(settings, "vehicle_kerb_density", None)
+    jam_density = getattr(settings, "vehicle_jam_density", None)
+    yard_density = lot_density if yard_density is None else yard_density
+    kerb_density = lot_density if kerb_density is None else kerb_density
+    jam_density = lot_density if jam_density is None else jam_density
+    drives = tuple(drives)
+    lots = [shape for shape, props in areas._items if props.get("category") == "parking"] if areas else []
+    reserved = STRtree([*lots, *(box(x, y, x + sw, y + sh) for x, y, sw, sh in drives)])
+    clear_boxes = [(x, y, x + sw, y + sh) for x, y, sw, sh in keep_clear]
+
+    def is_reserved(x, y, sw, sh):
+        return len(reserved) > 0 and reserved.query(
+            box(x, y, x + sw, y + sh), predicate="intersects").size > 0
 
     with Image.open(landscape_path) as source:
         land_arr = np.asarray(source.convert("RGB"))
@@ -98,7 +114,7 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
 
     # A car on most drives, as in Knox County.
     for x, y, sw, sh in drives:
-        if rng.random() <= min(1.0, 0.6 * settings.parking_density):
+        if rng.random() < min(1.0, 0.6 * yard_density):
             taken.add((x // 8, y // 8))
             zones.append(Zone("ParkingStall", x, y, sw, sh))
 
@@ -109,15 +125,11 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
     painted_stalls: list[tuple[int, int, int, int, bool, bool]] = []
     island_boxes: list[tuple[int, int, int, int, bool]] = []
     extra_lamps: list[tuple[int, int, tuple[int, int, int]]] = []
-    if areas is not None:
-        from shapely.geometry import box
-
+    if lots:
         buildings = [box(p.tile_x, p.tile_y, p.tile_x + p.width, p.tile_y + p.height)
                      for p in placements]
-        from shapely import STRtree
         from shapely.prepared import prep
         built = STRtree(buildings) if buildings else None
-        lots = [shape for shape, props in areas._items if props.get("category") == "parking"]
         for lot in lots:
             lot_prep = prep(lot)
             bounds = tuple(int(v) for v in lot.bounds)
@@ -172,7 +184,7 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
                     grouped_islands.setdefault((band, slot), []).append((x, y, sw, sh))
                     continue
                 painted_stalls.append((x, y, sw, sh, is_first_row, across))
-                if rng.random() > min(1.0, 0.55 * settings.parking_density):
+                if rng.random() >= min(1.0, 0.55 * lot_density):
                     continue
                 taken.add((x // 8, y // 8))
                 zones.append(Zone("ParkingStall", x, y, sw, sh))
@@ -196,33 +208,36 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
         for x in range(4, w - STALL_W - 4, step):
             if not is_asphalt(x, y):
                 continue
+            tier = int(road_hierarchy[y, x]) if road_hierarchy is not None else 0
+            if tier == ROAD_HIERARCHY_CODES["motorway"]:
+                continue
             kerbside = not (is_asphalt(x - 4, y) and is_asphalt(x + 4, y)
                             and is_asphalt(x, y - 4) and is_asphalt(x, y + 4))
-            # Deep inside a wide expanse of tarmac: no carriageway is 16 tiles
-            # across, so this is a car park, and its middle is exactly where
-            # the cars go. The old rule skipped every interior spot to avoid
-            # blocking a road, which left car parks themselves empty.
-            car_park = (is_asphalt(x - 8, y) and is_asphalt(x + 8, y)
+            # A broad asphalt apron with no road class can be an unmapped lot.
+            car_park = (not tier and is_asphalt(x - 8, y) and is_asphalt(x + 8, y)
                         and is_asphalt(x, y - 8) and is_asphalt(x, y + 8))
             if not kerbside and not car_park:
                 continue
             if car_park:
                 rate = 0.75
-            elif road_hierarchy is None or not road_hierarchy[y, x]:
+            elif not tier:
                 rate = 0.45
             else:
                 rate = {
                     1: 0.0, 2: 0.18, 3: 0.55, 4: 0.38,
-                    5: 0.28, 6: 0.16, 7: 0.08, 8: 0.02,
-                }.get(int(road_hierarchy[y, x]), 0.45)
-            chance = rate * settings.parking_density
-            if rng.random() > chance:
+                    5: 0.28, 6: 0.16, 7: 0.08,
+                }.get(tier, 0.45)
+            chance = rate * (lot_density if car_park else kerb_density)
+            if rng.random() >= chance:
                 continue
             vertical = is_asphalt(x, y - 2) or is_asphalt(x, y + 2)
             sw, sh = (STALL_W, STALL_H) if vertical else (STALL_H, STALL_W)
             # Not on a petrol station's forecourt, where the pumps stand.
-            if any(x < fx + fw and fx < x + sw and y < fy + fh and fy < y + sh
-                   for fx, fy, fw, fh in keep_clear):
+            if _in_boxes(x, y, sw, sh, clear_boxes):
+                continue
+            # A driveway or a mapped lot belongs to its own pass even at zero
+            # density. The curb sampler must not refill it.
+            if is_reserved(x, y, sw, sh):
                 continue
             key = (x // 8, y // 8)
             if key in taken:
@@ -254,16 +269,26 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
             veg_arr = np.asarray(v_src.convert("RGB"))
     town_boxes = [(z.tile_x, z.tile_y, z.tile_x + z.width, z.tile_y + z.height)
                   for z in zones if z.kind == "TownZone"]
-    if road_hierarchy is not None and settings.parking_density > 0:
-        zones.extend(_highway_traffic_jams(
-            is_asphalt, road_hierarchy, w, h, town_boxes, keep_clear, taken,
-            settings.parking_density, rng))
+    jams = []
+    if road_hierarchy is not None and jam_density > 0:
+        jams = _highway_traffic_jams(
+            is_asphalt, road_hierarchy, w, h, town_boxes + clear_boxes, taken,
+            jam_density, rng, is_reserved)
+        zones.extend(jams)
+    if road_hierarchy is not None:
+        road_mask = asphalt_mask & (road_hierarchy >= ROAD_HIERARCHY_CODES["residential"])
+        for jam in jams:
+            x, y = jam.tile_x, jam.tile_y
+            road_mask[y:y + jam.height, x:x + jam.width] = False
+        zones.extend(_road_story_zones(road_mask, clear_boxes, is_reserved))
     zones.extend(_forage_and_nav_zones(None, veg_arr, w, h, town_boxes,
                                        land_key=land_key))
 
     if veg_path and veg_arr is not None and (painted_stalls or island_boxes or extra_lamps):
         veg_out = _paint_parking_lots(
-            veg_arr, painted_stalls, island_boxes, extra_lamps
+            veg_arr, painted_stalls, island_boxes, extra_lamps,
+            lamp_density=(getattr(settings, "street_lamp_density", 1.0)
+                          if getattr(settings, "street_lamp_mode", "context") == "context" else 0.0),
         )
         if veg_out is not None:
             import knoxfiles
@@ -277,9 +302,11 @@ def _paint_parking_lots(
     stalls: list[tuple[int, int, int, int, bool, bool]],
     islands: list[tuple[int, int, int, int, bool]] = (),
     extra_lamps: list[tuple[int, int, tuple[int, int, int]]] = (),
+    *, lamp_density: float = 1.0,
 ) -> np.ndarray | None:
     """Paint bay lines, wheel stops, divider islands, and light poles onto _veg.bmp."""
     from generator import pz_colors as C
+    from generator.rendering.furniture import sample_fixture
     from knoxbuild.yards import _rule_ready
 
     paint_blocks = _rule_ready("Parking block")
@@ -337,7 +364,8 @@ def _paint_parking_lots(
 
         # Interior: light pole in the middle, greenery/tree along the spine.
         cx, cy = (ix0 + ix1) // 2, (iy0 + iy1) // 2
-        put(cx, cy, C.LAMP_S if across else C.LAMP_E)
+        if sample_fixture(lamp_density, cx + cy * w):
+            put(cx, cy, C.LAMP_S if across else C.LAMP_E)
         if across:
             for ty in range(iy0 + 1, iy1 - 1):
                 if ty == cy:
@@ -350,12 +378,14 @@ def _paint_parking_lots(
                 put(tx, cy, C.TREE_SMALL if tx in (ix0 + 2, ix1 - 3) else C.BUSHES)
 
     for lx, ly, lamp in extra_lamps:
-        put(lx, ly, lamp)
+        if sample_fixture(lamp_density, lx + ly * w):
+            put(lx, ly, lamp)
 
     return out if changed else None
 
 
 JAM_SPACING = 90              # tiles between highway pileups so routes stay drivable
+JAM_WIDTH, JAM_LENGTH = 3, 24
 
 
 def _in_boxes(x: int, y: int, sw: int, sh: int,
@@ -366,23 +396,15 @@ def _in_boxes(x: int, y: int, sw: int, sh: int,
 
 def _highway_traffic_jams(is_asphalt, road_hierarchy: np.ndarray,
                           w: int, h: int,
-                          town_boxes: list[tuple[int, int, int, int]],
-                          keep_clear: list[tuple[int, int, int, int]],
+                          clear_boxes: list[tuple[int, int, int, int]],
                           taken: set[tuple[int, int]],
-                          parking_density: float, rng) -> list[Zone]:
-    """Place occasional multi-car ParkingStall clusters on major roads out of town.
-
-    PZ spawns traffic jams, burnt wrecks and roadside emergency vehicles from
-    ParkingStall zones; placing small staggered clusters on secondary/primary/
-    trunk/motorway stretches outside TownZone turns empty highways into
-    believable evacuation bottlenecks.
-    """
+                          density: float, rng, is_reserved) -> list[Zone]:
+    """Place a native single-lane traffic jam on suitable roads outside town."""
     from .world import Zone
 
     jams: list[Zone] = []
     centers: list[tuple[int, int]] = []
     rh_h, rh_w = road_hierarchy.shape[:2]
-    clear_boxes = [(fx, fy, fx + fw, fy + fh) for fx, fy, fw, fh in keep_clear]
 
     for y in range(6, h - STALL_H - 6, 12):
         for x in range(6, w - STALL_W - 6, 12):
@@ -391,38 +413,33 @@ def _highway_traffic_jams(is_asphalt, road_hierarchy: np.ndarray,
             tier = int(road_hierarchy[y, x])
             if tier < 5 or not is_asphalt(x, y):
                 continue
-            if _in_boxes(x, y, STALL_W, STALL_H, town_boxes):
+            if _in_boxes(x, y, STALL_W, STALL_H, clear_boxes):
                 continue
             if any((x - cx) ** 2 + (y - cy) ** 2 < JAM_SPACING ** 2
                    for cx, cy in centers):
                 continue
-            chance = (0.16 if tier >= 6 else 0.07) * parking_density
+            chance = (0.16 if tier >= 6 else 0.07) * density
             if rng.random() > chance:
                 continue
 
-            vertical = is_asphalt(x, y - 3) and is_asphalt(x, y + 3)
-            sw, sh = (STALL_W, STALL_H) if vertical else (STALL_H, STALL_W)
-            # Stagger 2-3 vehicles along and slightly across the carriageway.
-            offsets = ([(0, 0), (-2, 5), (2, -5)] if vertical
-                       else [(0, 0), (5, -2), (-5, 2)])
-            count = rng.choice((2, 3))
-            placed_here = 0
-            for dx, dy in offsets[:count]:
-                sx, sy = x + dx, y + dy
-                if not (4 <= sx < w - sw - 4 and 4 <= sy < h - sh - 4):
+            for sw, sh, name in ((JAM_WIDTH, JAM_LENGTH, "trafficjamn"),
+                                 (JAM_LENGTH, JAM_WIDTH, "trafficjame")):
+                sx, sy = x - sw // 2, y - sh // 2
+                if (sx < 0 or sy < 0 or sx + sw > rh_w or sy + sh > rh_h
+                        or _in_boxes(sx, sy, sw, sh, clear_boxes) or is_reserved(sx, sy, sw, sh)):
                     continue
-                if not is_asphalt(sx, sy):
+                if not all(is_asphalt(tx, ty) and road_hierarchy[ty, tx] >= 5
+                           for ty in range(sy, sy + sh) for tx in range(sx, sx + sw)):
                     continue
-                if _in_boxes(sx, sy, sw, sh, clear_boxes):
+                cells = {(cx, cy)
+                         for cy in range(sy // 8, (sy + sh - 1) // 8 + 1)
+                         for cx in range(sx // 8, (sx + sw - 1) // 8 + 1)}
+                if not taken.isdisjoint(cells):
                     continue
-                key = (sx // 8, sy // 8)
-                if key in taken:
-                    continue
-                taken.add(key)
-                jams.append(Zone("ParkingStall", sx, sy, sw, sh))
-                placed_here += 1
-            if placed_here:
+                taken.update(cells)
+                jams.append(Zone("ParkingStall", sx, sy, sw, sh, name))
                 centers.append((x, y))
+                break
     return jams
 
 
@@ -437,6 +454,42 @@ def _pack_rgb(arr: np.ndarray) -> np.ndarray:
 
 def _code(c: tuple[int, int, int]) -> int:
     return (c[0] << 16) | (c[1] << 8) | c[2]
+
+
+def _road_story_zones(road_mask: np.ndarray, clear_boxes, is_reserved):
+    """Find straight carriageways wide enough for the game's random road stories."""
+    from .world import CELL_SIZE, Zone
+
+    # B42 accepts rectangular Nav zones longer than 30 tiles and narrower than 15.
+    # The game's stories also need room across the road for at least one vehicle.
+    length, min_width, max_width = 40, 6, 12
+    height, width = road_mask.shape
+    for y in range(0, height, CELL_SIZE):
+        for x in range(0, width, CELL_SIZE):
+            cell = road_mask[y:y + CELL_SIZE, x:x + CELL_SIZE]
+            used = np.zeros_like(cell)
+            for horizontal in (True, False):
+                road = cell if horizontal else cell.T
+                occupied = used if horizontal else used.T
+                for start in range(0, road.shape[1] - length + 1, length // 2):
+                    strip = slice(start, start + length)
+                    cross_section = np.all(road[:, strip], axis=1)
+                    edges = np.flatnonzero(np.diff(np.pad(cross_section, 1))).tolist()
+                    for lo, hi in zip(edges[::2], edges[1::2]):
+                        span = hi - lo
+                        if span < min_width:
+                            continue
+                        breadth = min(span, max_width)
+                        side = lo + (span - breadth) // 2
+                        footprint = occupied[side:side + breadth, strip]
+                        if footprint.any():
+                            continue
+                        zx, zy, zw, zh = (x + start, y + side, length, breadth) if horizontal else (
+                            x + side, y + start, breadth, length)
+                        if _in_boxes(zx, zy, zw, zh, clear_boxes) or is_reserved(zx, zy, zw, zh):
+                            continue
+                        footprint[:] = True
+                        yield Zone("Nav", zx, zy, zw, zh)
 
 
 def _forage_and_nav_zones(land_arr: np.ndarray | None, veg_arr: np.ndarray | None,

@@ -6,6 +6,7 @@ from collections import deque
 import numpy as np
 
 from generator import pz_colors as C
+from knoxbuild.settings import Settings
 from knoxbuild.works import yard_width
 from tests.test_yards import SIZE, _paint
 
@@ -74,6 +75,14 @@ class WorksYards(unittest.TestCase):
         self.assertTrue(got & DUMPSTER)
         self.assertGreaterEqual(len(got & {C.WORKS_PALLET, C.WORKS_BRICKS, C.WORKS_DRUM,
                                            C.WORKS_BARREL, C.WORKS_CRATE, C.WORKS_TIRES}), 1)
+
+    def test_zero_objects_and_osm_only_lighting_leave_a_clear_yard(self):
+        works = [("industrial", X, Y)]
+        settings = Settings(workyard_prop_density=0, street_lamp_mode="osm")
+        veg = _paint(50, 50, works, veg=True, settings=settings)
+        ground = _paint(50, 50, works, settings=settings)
+        self.assertFalse(_colours(veg) & OBJECTS)
+        self.assertEqual(tuple(ground[Y + SIZE, X + 1]), C.MEDIUM_ASPHALT)
 
     def test_nothing_stands_at_the_door(self):
         door = (X + 3, Y - 1)

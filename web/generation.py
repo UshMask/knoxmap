@@ -431,6 +431,7 @@ def _generate(data):
             spawn_density=settings.spawn_density,
             tree_density=settings.tree_density,
             forest_density=settings.forest_density,
+            street_settings=settings,
             forest_params=ForestParams(
                 stand_m=settings.forest_stand_m, edge_m=settings.forest_edge_m,
                 thickets=settings.forest_thickets,

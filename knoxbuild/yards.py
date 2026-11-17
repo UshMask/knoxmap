@@ -24,6 +24,9 @@ import numpy as np
 from PIL import Image
 
 from generator import pz_colors as C
+from generator.rendering.furniture import sample_fixture
+
+from .settings import DEFAULT, Settings
 
 from .bitmaps import read_rgb, same_colour
 
@@ -401,7 +404,8 @@ def _pave_building_apron(bx0: int, by0: int, bw: int, bh: int,
 def paint_paths(out_dir: str, map_name: str, rows: list[dict], occupied,
                 drives: list | None = None,
                 lights: list | None = None,
-                fronts: set | None = None) -> tuple[int, list]:
+                fronts: set | None = None, *,
+                settings: Settings = DEFAULT) -> tuple[int, list]:
     """Dress houses and connect mapped garages. Return houses dressed and fences.
 
     Each drive's parking space, (x, y, width, height) at its house end, is
@@ -590,7 +594,9 @@ def paint_paths(out_dir: str, map_name: str, rows: list[dict], occupied,
                     drives.append((min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1))
                 # The dustbin at the top of the drive, on the lawn beside it.
                 bx, by = strip[0]
-                put(bx - px, by - py, C.BIN)
+                tx, ty = bx - px, by - py
+                if sample_fixture(settings.yard_bin_density, tx + ty * w):
+                    put(tx, ty, C.BIN)
                 break
 
         frng = random.Random((bx0 * 2654435761) ^ (by0 * 2246822519) ^ 0x517CC1B7)
@@ -647,12 +653,14 @@ def paint_paths(out_dir: str, map_name: str, rows: list[dict], occupied,
             mb_side = None
             for k in (1, -1):
                 if free(mx + px * k, my + py * k):
-                    put(mx + px * k, my + py * k, C.MAILBOX)
+                    if sample_fixture(settings.house_mailbox_density, mx + my * w):
+                        put(mx + px * k, my + py * k, C.MAILBOX)
                     mb_side = k
                     break
             if mb_side is not None and veg is not None and frng.random() < 0.35:
                 bx_, by_ = mx - px * mb_side, my - py * mb_side
-                if free(bx_, by_) and tuple(ground[by_, bx_]) not in LAWNLESS:
+                if (free(bx_, by_) and tuple(ground[by_, bx_]) not in LAWNLESS
+                        and sample_fixture(settings.yard_bin_density, bx_ + by_ * w)):
                     put(bx_, by_, C.BIN)
         if not home:
             dressed += 1
@@ -804,9 +812,13 @@ def paint_paths(out_dir: str, map_name: str, rows: list[dict], occupied,
                 place(left, 1, C.GRILL)
                 place(mid, 1, C.CHAIR_N if dy else C.CHAIR_W)
             elif archetype == "laundry":
-                place(1, depth - 2, C.BIN)
+                tx, ty = at(1, depth - 2)
+                if sample_fixture(settings.yard_bin_density, tx + ty * w):
+                    place(1, depth - 2, C.BIN)
             else:
-                place(width - 2, depth - 2, C.BIN)
+                tx, ty = at(width - 2, depth - 2)
+                if sample_fixture(settings.yard_bin_density, tx + ty * w):
+                    place(width - 2, depth - 2, C.BIN)
 
             # Yard storytelling: the dog's house against one fence, a swing
             # for the kids against the other. Both want lawn, so they are
@@ -956,7 +968,10 @@ def paint_paths(out_dir: str, map_name: str, rows: list[dict], occupied,
             lambda f: _outside_doors(os.path.join(out_dir, "buildings", f)), works_files)))
     canvas = SimpleNamespace(ground=ground, veg=veg, w=w, h=h, free=free, paint=paint,
                              paved_at=paved_at, occupied_at=occupied_at)
-    dress_works(rows, works_doors, canvas, drives, random.Random(0x3077))
+    dress_works(rows, works_doors, canvas, drives, random.Random(0x3077),
+                prop_density=settings.workyard_prop_density,
+                lamp_density=(settings.street_lamp_density
+                              if settings.street_lamp_mode == "context" else 0.0))
 
     # Give non-home buildings a modest concrete apron hugging their walls
     # after all doorway walks and industrial tarmac yards are placed.

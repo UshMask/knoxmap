@@ -15,7 +15,32 @@ from dataclasses import asdict, dataclass, fields
 
 
 @dataclass(frozen=True)
-class Settings:
+class StreetSettings:
+    """The street fixtures painted in the terrain pass."""
+
+    street_lamp_mode: str = "context"
+    street_lamp_density: float = 1.0
+    street_pole_density: float = 1.0
+    street_bin_mode: str = "context"
+    street_bin_density: float = 1.0
+    street_bench_density: float = 1.0
+    street_hydrant_density: float = 1.0
+    street_verge_scope: str = "built_up"
+    street_sign_density: float = 1.0
+    street_postboxes: int = 1
+    street_kiosks: int = 1
+    street_litter_density: float = 1.0
+
+
+STREET_RENDER_KEYS = tuple(f.name for f in fields(StreetSettings))
+DEFAULT_STREET_SETTINGS = StreetSettings()
+VEHICLE_DENSITY_KEYS = ("vehicle_yard_density", "vehicle_kerb_density", "vehicle_jam_density")
+STREET_MODES = ("context", "osm", "off")
+STREET_VERGE_SCOPES = ("built_up", "sidewalks")
+
+
+@dataclass(frozen=True)
+class Settings(StreetSettings):
     # --- zombies ---------------------------------------------------------
     # The most zombies one 10x10-tile chunk can be given. Vanilla Knox County
     # peaks at 10 and leaves 97% of its map empty; 96 here once buried a town.
@@ -191,9 +216,17 @@ class Settings:
     height_mix: str = "auto"
 
     # --- zones -----------------------------------------------------------
-    # Scales how many ParkingStall zones are found. Vehicles only ever spawn
-    # inside one, so this is the dial for how many cars are in the streets.
+    # Scales the spawn zones in parking lots. Older settings used this for
+    # all vehicles, so missing split settings inherit it.
     parking_density: float = 1.0
+    vehicle_yard_density: float | None = None
+    vehicle_kerb_density: float | None = None
+    vehicle_jam_density: float | None = None
+
+    # Outdoor fixtures from the Build pass, separate from mapped street props.
+    house_mailbox_density: float = 1.0
+    yard_bin_density: float = 1.0
+    workyard_prop_density: float = 1.0
 
     # --- basements (knoxbuild/basements.py) --------------------------------
     # The share of houses with a cellar; a quarter of it in China, Japan and
@@ -226,14 +259,18 @@ class Settings:
     winter_look: str = "auto"          # auto | on | off
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        values = asdict(self)
+        for key in VEHICLE_DENSITY_KEYS:
+            if values[key] is None:
+                values[key] = self.parking_density
+        return values
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "Settings":
         """Build from untrusted input, ignoring junk and clamping the rest."""
         data = data if isinstance(data, dict) else {}
         preset = PRESETS.get(str(data.get("preset", "")).lower())
-        base = preset.to_dict() if preset else {}
+        base = asdict(preset) if preset else {}
 
         kept: dict = {}
         types = {f.name: f.type for f in fields(cls)}
@@ -243,7 +280,10 @@ class Settings:
                         "landcover": LANDCOVER_OPTIONS,
                         "elevation": ELEVATION_OPTIONS,
                         "hospitals": HOSPITALS_OPTIONS,
-                        "winter_look": WINTER_LOOK_OPTIONS}
+                        "winter_look": WINTER_LOOK_OPTIONS,
+                        "street_lamp_mode": STREET_MODES,
+                        "street_bin_mode": STREET_MODES,
+                        "street_verge_scope": STREET_VERGE_SCOPES}
         for name, raw in list(base.items()) + list(data.items()):
             if name not in types:
                 continue          # unknown key, including "preset" itself
@@ -352,6 +392,22 @@ LIMITS = {
     "neighbourhood_tiles": (20, 2000),
     "style_oddity": (0.0, 1.0),
     "parking_density": (0.0, 4.0),
+    **{key: (0.0, 4.0) for key in VEHICLE_DENSITY_KEYS},
+    "street_lamp_mode": (0, 2),
+    "street_bin_mode": (0, 2),
+    "street_verge_scope": (0, 1),
+    "street_lamp_density": (0.0, 3.0),
+    "street_pole_density": (0.0, 3.0),
+    "street_bin_density": (0.0, 1.0),
+    "street_bench_density": (0.0, 3.0),
+    "street_hydrant_density": (0.0, 3.0),
+    "street_sign_density": (0.0, 3.0),
+    "street_postboxes": (0, 1),
+    "street_kiosks": (0, 1),
+    "street_litter_density": (0.0, 3.0),
+    "house_mailbox_density": (0.0, 1.0),
+    "yard_bin_density": (0.0, 1.0),
+    "workyard_prop_density": (0.0, 1.0),
     "basement_share": (0.0, 1.0),
     "max_basement_depth": (0, 32),
     # Not a range at all - the page asks /api/settings for the options -

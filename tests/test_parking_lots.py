@@ -12,14 +12,51 @@ from shapely.geometry import box
 
 from generator import pz_colors as C
 from generator import renderer
-from generator.osm import OSMFeature, classify
+from generator.osm import OSMFeature, ROAD_HIERARCHY_CODES, classify
 from generator.rendering.geometry import _is_polygon
 from generator.rendering.parking import square_parking_lots
 from generator.rendering.projection import Projector
+from knoxbuild.settings import Settings
 from knoxbuild.zones_detect import _detect_zones
 
 
 class ParkingLotDressingTest(unittest.TestCase):
+    def test_each_vehicle_setting_controls_its_own_locations(self):
+        lot_box = (8, 8, 62, 50)
+        yard_box = (76, 4, 93, 16)
+        street_box = (4, 60, 350, 68)
+        highway_box = (4, 101, 350, 126)
+        land = Image.new("RGB", (360, 144), C.MEDIUM_GRASS)
+        for bounds in (lot_box, yard_box, street_box, highway_box):
+            land.paste(C.DARK_ASPHALT, bounds)
+        hierarchy = np.zeros((144, 360), dtype=np.uint8)
+        hierarchy[60:68, 4:350] = ROAD_HIERARCHY_CODES["residential"]
+        hierarchy[101:126, 4:350] = ROAD_HIERARCHY_CODES["motorway"]
+        areas = SimpleNamespace(_items=[(box(*lot_box), {"category": "parking"})])
+        knobs = {"parking_density": lot_box, "vehicle_yard_density": yard_box,
+                 "vehicle_kerb_density": street_box, "vehicle_jam_density": highway_box}
+
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "map.bmp")
+            land.save(path)
+            for enabled, (x0, y0, x1, y1) in knobs.items():
+                with self.subTest(only=enabled):
+                    settings = Settings.from_dict({key: 4 if key == enabled else 0 for key in knobs})
+                    zones = _detect_zones(path, [], settings=settings, areas=areas,
+                                          drives=[(76, 4, 17, 12)], road_hierarchy=hierarchy)
+                    stalls = [z for z in zones if z.kind == "ParkingStall"]
+                    self.assertTrue(stalls)
+                    self.assertTrue(all(x0 <= z.tile_x < x1 and y0 <= z.tile_y < y1 for z in stalls))
+
+    def test_old_density_applies_to_each_new_control_unless_overridden(self):
+        settings = Settings.from_dict({"preset": "suburb", "parking_density": 0.45,
+                                       "vehicle_jam_density": 0})
+        values = settings.to_dict()
+        self.assertEqual(values["vehicle_yard_density"], 0.45)
+        self.assertEqual(values["vehicle_kerb_density"], 0.45)
+        self.assertEqual(values["vehicle_jam_density"], 0)
+        self.assertEqual(Settings.from_dict(values).to_dict(), values)
+
     def test_osm_parking_lot_gets_stall_lines_and_wheel_stops(self):
         w, h = 60, 60
         with tempfile.TemporaryDirectory() as td:

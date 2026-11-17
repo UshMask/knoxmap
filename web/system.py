@@ -459,12 +459,14 @@ def _ortools_ready() -> bool:
 def api_settings():
     """The knobs, their limits, and the presets - so the page is not a
     hard-coded copy of them that drifts out of step."""
-    from knoxbuild.settings import LIMITS, BUILDING_ALIGNMENT_OPTIONS
+    from knoxbuild.settings import (BUILDING_ALIGNMENT_OPTIONS, LIMITS,
+                                    STREET_MODES, STREET_VERGE_SCOPES)
 
     map_dir = _map_dir(request.args.get("map", ""))
     current = _load_settings(map_dir) if map_dir else Settings()
     from dataclasses import fields
 
+    street_modes = list(zip(STREET_MODES, ("OpenStreetMap and local rules", "OpenStreetMap only", "Off")))
     return jsonify({
         "current": current.to_dict(),
         "defaults": Settings().to_dict(),
@@ -476,7 +478,8 @@ def api_settings():
         # integer can only reach 0, 1, 2 or 3. Say which is which.
         "types": {f.name: ("enum" if f.name in (
                               "building_alignment", "arch_style", "height_mix",
-                              "landcover", "elevation", "hospitals", "winter_look")
+                              "landcover", "elevation", "hospitals", "winter_look",
+                              "street_lamp_mode", "street_bin_mode", "street_verge_scope")
                            else "text" if f.name in ("region_override", "building_mix")
                            else "int" if f.type in (int, "int") else "float")
                   for f in fields(Settings)},
@@ -503,6 +506,10 @@ def api_settings():
             "hospitals": [["hifld", "HIFLD"],
                           ["osm", "OpenStreetMap only"], ["off", "Off"]],
             "winter_look": [["auto", "Auto"], ["on", "On"], ["off", "Off"]],
+            "street_lamp_mode": street_modes,
+            "street_bin_mode": street_modes,
+            "street_verge_scope": list(zip(STREET_VERGE_SCOPES,
+                                           ("Near buildings", "All suitable sidewalks"))),
         },
         "limits": {k: list(v) for k, v in LIMITS.items()},
         "presets": {name: s.to_dict() for name, s in PRESETS.items()},
