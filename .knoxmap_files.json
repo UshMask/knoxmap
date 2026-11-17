@@ -142,6 +142,7 @@
     "knoxbuild/pumps.py",
     "knoxbuild/regional.py",
     "knoxbuild/repair.py",
+    "knoxbuild/road_vehicles.py",
     "knoxbuild/room_solver.json",
     "knoxbuild/room_solver.py",
     "knoxbuild/rules.py",

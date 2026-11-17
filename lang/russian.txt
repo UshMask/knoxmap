@@ -733,9 +733,9 @@ Enables more marked bays for vehicle spawning. The game’s Car Spawn Rate sets 
 Yards and driveways = Дворы и подъезды
 Scales vehicle spawn places on driveways and in yards. = Меняет число мест появления машин во дворах и на подъездах к зданиям.
 Roadside parking = Парковка у обочин
-Scales vehicle spawn places found along the edges of roads. = Меняет число мест появления машин у обочин.
-Highway pileups = Заторы на трассах
-Scales traffic jam zones on major roads outside built-up areas. The game’s Traffic Jams option enables them. = Меняет число зон заторов на крупных дорогах за пределами застройки. В игре должна быть включена настройка заторов.
+Scales bays that fit along the asphalt edge and leave a lane open. = Меняет число мест вдоль края асфальта там, где остаётся свободная полоса.
+Traffic jams = Заторы
+Scales traffic jams spread across major roads. The game’s Traffic Jams option enables them. = Меняет число заторов, распределённых по крупным дорогам. В игре должна быть включена настройка заторов.
 All suitable sidewalks = Все подходящие тротуары
 Near buildings = Рядом со зданиями
 OpenStreetMap and local rules = OSM и автозаполнение

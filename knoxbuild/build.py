@@ -2112,23 +2112,24 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
                         pop, indent=2, ensure_ascii=False)
         return pop
 
+    vehicle_report = {}
     with ThreadPoolExecutor(max_workers=5) as pool:
         job_fences = pool.submit(build_fences, out_dir, map_name, proj, occupied,
                                  areas, bdir, extra=yard_fences, keep_clear=fence_clear)
         job_spawn = pool.submit(make_spawn_map)
         job_paper = pool.submit(worldmap.write, out_dir, map_name, proj, info,
                                 outlines)
+        job_structures = pool.submit(build_structures, out_dir, map_name, bdir)
+        paper_map = job_paper.result()
+        # A fence lot spans its whole cell. Only use building lots for town zones.
         job_zones = pool.submit(
             _detect_zones, os.path.join(out_dir, f"{map_name}.bmp"), placements,
             settings=settings, areas=areas, drives=drives, keep_clear=forecourts,
             road_hierarchy=road_hierarchy,
+            streets_path=os.path.join(out_dir, "streets.xml"), vehicle_report=vehicle_report,
             veg_path=os.path.join(out_dir, f"{map_name}_veg.bmp"))
-        # Fences go into the project alongside the buildings, but not into the
-        # town zones: a fence lot spans its whole cell and would mark it all town.
-        job_structures = pool.submit(build_structures, out_dir, map_name, bdir)
         fence_placements, fence_tiles = job_fences.result()
         population = job_spawn.result()
-        paper_map = job_paper.result()
         zones = job_zones.result()
         structure_placements, raised = job_structures.result()
     placements = (placements + fence_placements + structure_placements +
@@ -2141,6 +2142,8 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
         f.write(render_pzw(info["cells_x"], info["cells_y"],
                            f"{map_name}.bmp", placements, map_name,
                            project_dir=out_dir, zones=zones))
+    knoxfiles.write(os.path.join(out_dir, f"{map_name}_vehicle_zones.json"),
+                    vehicle_report, indent=2, ensure_ascii=False)
 
     csv_path = os.path.join(out_dir, f"{map_name}_placements.csv")
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
@@ -2246,6 +2249,9 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
     n_forage = sum(1 for z in zones if z.kind in ("Forest", "DeepForest", "Vegitation", "Farm"))
     n_nav = sum(1 for z in zones if z.kind == "Nav")
     print(f"zones                 : {n_park} parking, {n_town} town, {n_forage} forage, {n_nav} nav")
+    transport = vehicle_report["counts"]
+    print(f"road vehicles         : {transport['roadside']} roadside bays, "
+          f"{transport['traffic_jams']} traffic jams, {transport['road_stories']} road story zones")
     print(f"petrol stations       : {n_pumps} pumps at {len(stations)} stations"
           f", {len(canopies)} canopies and {len(loose_fuel)} points")
     print(f"front paths, yards    : {paths} houses, {len(yard_fences)} back yards")

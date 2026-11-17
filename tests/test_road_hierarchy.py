@@ -197,8 +197,8 @@ class RoadHierarchyTests(unittest.TestCase):
             motorway_zones = building._detect_zones(
                 path, [], settings=settings, road_hierarchy=motorway)
 
-        local_stalls = sum(zone.kind == "ParkingStall" for zone in local_zones)
-        motorway_stalls = sum(zone.kind == "ParkingStall" for zone in motorway_zones)
+        local_stalls = sum(zone.kind == "ParkingStall" and not zone.name for zone in local_zones)
+        motorway_stalls = sum(zone.kind == "ParkingStall" and not zone.name for zone in motorway_zones)
         self.assertGreater(local_stalls, motorway_stalls)
 
     def test_kerbside_bays_do_not_place_wheel_stops_on_roads(self):
@@ -217,12 +217,16 @@ class RoadHierarchyTests(unittest.TestCase):
             classes[16:31, :] = osm.ROAD_HIERARCHY_CODES["residential"]
             with mock.patch("knoxbuild.yards._rule_ready", return_value=True):
                 zones = building._detect_zones(
-                    ground_path, [], settings=SimpleNamespace(parking_density=1.0),
+                    ground_path, [], settings=SimpleNamespace(parking_density=0, vehicle_kerb_density=4),
                     road_hierarchy=classes, veg_path=veg_path)
             veg = np.asarray(Image.open(veg_path).convert("RGB"))
             painted = {tuple(colour) for colour in veg.reshape(-1, 3)}
 
-        self.assertTrue(any(zone.kind == "ParkingStall" for zone in zones), "no bays")
+        bays = [zone for zone in zones if zone.kind == "ParkingStall"]
+        self.assertTrue(bays, "no bays")
+        for bay in bays:
+            self.assertEqual((bay.width, bay.height), (5, 3))
+            self.assertIn(bay.tile_y, (16, 28))
         stops = painted & (set(renderer.C.PARKING_BLOCK_X) | set(renderer.C.PARKING_BLOCK_Y))
         self.assertFalse(stops, "wheel stops should not be laid on roads or paths")
 
@@ -281,6 +285,31 @@ class RoadHierarchyTests(unittest.TestCase):
             write_objects(directory, directory)
             exported = (project / "objects.lua").read_text(encoding="utf-8")
             self.assertEqual(exported.count('name = "trafficjame", type = "ParkingStall"'), len(jams))
+
+    def test_traffic_jam_report_lists_both_named_arterials(self):
+        with TemporaryDirectory() as directory:
+            project = Path(directory)
+            ground = Image.new("RGB", (640, 300), renderer.C.DARK_GRASS)
+            hierarchy = np.zeros((300, 640), dtype=np.uint8)
+            for y in (35, 175):
+                ground.paste(renderer.C.MEDIUM_ASPHALT, (0, y, 640, y + 12))
+                hierarchy[y:y + 12, :] = osm.ROAD_HIERARCHY_CODES["primary"]
+            ground.save(project / "ground.bmp")
+            streets = project / "streets.xml"
+            streets.write_text(
+                '<streets version="1">'
+                '<street name="North" width="12"><points><point x="0" y="41"/>'
+                '<point x="640" y="41"/></points></street>'
+                '<street name="South" width="12"><points><point x="0" y="181"/>'
+                '<point x="640" y="181"/></points></street></streets>', encoding="utf-8")
+            report = {}
+            zones = building._detect_zones(
+                str(project / "ground.bmp"), [], settings=SimpleNamespace(
+                    parking_density=0, vehicle_jam_density=1), road_hierarchy=hierarchy,
+                streets_path=str(streets), vehicle_report=report)
+
+        self.assertEqual({jam["street"] for jam in report["jams"]}, {"North", "South"})
+        self.assertEqual(report["counts"]["traffic_jams"], sum(bool(z.name) for z in zones))
 
 
 if __name__ == "__main__":
