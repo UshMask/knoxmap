@@ -100,7 +100,7 @@ def _fetch_landcover(knoxdata, settings, bbox, map_name) -> None:
                     map_name, type(exc).__name__, exc)
 
 
-def _generate(data):
+def _generate(data, *, locked_map=None):
     # A map drawn on the editor's own sheet brings its own size and its own
     # corner of the world; the box and the features both come out of it, so
     # there is nothing to draw on the world map and nothing to download.
@@ -197,9 +197,10 @@ def _generate(data):
     # holds nothing but the settings, and every failed attempt left one behind.
     made_here = not map_dir.exists()
     map_dir.mkdir(parents=True, exist_ok=True)
-    busy = _hold(map_dir, "generated")
-    if busy is not None:
-        return busy
+    if map_dir.resolve() != locked_map:
+        busy = _hold(map_dir, "generated")
+        if busy is not None:
+            return busy
 
     drawing_saved = False
 
@@ -423,6 +424,9 @@ def _generate(data):
     render_stage = "chunks" if (approx_w // 300) * (approx_h // 300) > 144 else "roads"
 
     try:
+        from tools.compile_map import mark_lots_stale
+
+        mark_lots_stale(map_dir)
         result = renderer.render(
             features, south, west, north, east,
             meters_per_tile=meters_per_tile,
@@ -630,7 +634,8 @@ def api_buildings():
             refreshed = make_response(_generate({
                 **applied["bbox"], "mapName": map_dir.name,
                 "metersPerTile": applied["meters_per_tile"], "shape": applied.get("shape"),
-                "settings": settings.to_dict(), "sketch": drawn, "drawnOnly": drawn_only}))
+                "settings": settings.to_dict(), "sketch": drawn, "drawnOnly": drawn_only},
+                locked_map=map_dir))
             if refreshed.status_code >= 400:
                 return refreshed
             terrain = refreshed.get_json()
@@ -650,12 +655,15 @@ def api_buildings():
     out = io.StringIO()
     try:
         from contextlib import redirect_stdout
+        from tools.compile_map import mark_lots_stale
+
         def say(text: str, fraction: float | None) -> None:
             _set_progress(map_dir.name, stage="buildings", note=text,
                           fraction=fraction)
 
         say("Starting", 0.0)
         with redirect_stdout(out):
+            mark_lots_stale(map_dir)
             build_buildings(str(map_dir), settings=settings,
                             should_stop=_stopper(map_dir.name), progress=say)
         _set_progress(map_dir.name, stage="buildings-done", note="", fraction=1.0)

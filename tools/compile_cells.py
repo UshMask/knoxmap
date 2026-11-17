@@ -7,6 +7,7 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
+from time import perf_counter
 
 import PIL
 import numpy as np
@@ -94,7 +95,10 @@ class CellCache:
                           for x in range(ox // side, (ox + w - 1) // side + 1)}
         self.all_rows = {str(y) for _, y in self.all_cells}
         self.lots = map_source.read_lots(str(project))
+        started = perf_counter()
         self.inputs = self._building_hashes()
+        knoxlog.log.info("compile %s: hashed %d building files in %.3fs",
+                         project.name, len(self.inputs), perf_counter() - started)
         self.state = None
         self.partial = False
         self.changed = set()
@@ -139,10 +143,13 @@ class CellCache:
         return inputs
 
     def verify_inputs(self):
+        started = perf_counter()
         layout = self.pzw.read_bytes()
         if (hashlib.sha256(layout).hexdigest() != self.pzw_hash
                 or self.guard != self._guard(layout) or self.inputs != self._building_hashes()):
             raise RuntimeError("The map changed during compilation. Compile it again.")
+        knoxlog.log.info("compile %s: verified inputs before publication in %.3fs",
+                         self.project.name, perf_counter() - started)
 
     def select(self, room_rows, origin, size):
         ox, oy = origin

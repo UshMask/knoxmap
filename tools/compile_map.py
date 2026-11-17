@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -653,6 +654,42 @@ def prepare_output(project: Path, run: str | None = None,
 
 
 LOCK_FILE = ".compiling"
+INCOMPLETE_LOTS = ".knoxmap-incomplete-lots"
+_HELD_LOCKS = {}
+_LOCK_GUARD = threading.Lock()
+
+
+class ProjectBusy(RuntimeError):
+    pass
+
+
+def mark_lots_stale(project: Path) -> None:
+    marker = project / INCOMPLETE_LOTS
+    if not marker.exists():
+        marker.write_text("stale", encoding="utf-8")
+
+
+def _interrupted_publication(marker: Path) -> bool:
+    return marker.exists() and marker.read_text(encoding="utf-8") != "stale"
+
+
+def _lock_file(stream):
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _lock_path(target: Path) -> Path:
+    suffix = f"-{os.getuid()}" if hasattr(os, "getuid") else ""
+    folder = Path(tempfile.gettempdir()) / f"knoxmap-operation-locks{suffix}"
+    folder.mkdir(mode=0o700, exist_ok=True)
+    key = hashlib.sha256(os.fsencode(os.path.normcase(target))).hexdigest()
+    return folder / key
 
 
 def _pid_alive(pid: int) -> bool:
@@ -695,42 +732,49 @@ def claim(project: Path, run: str, doing: str = "compiled") -> None:
     process holds it. Generating and building take it as well as compiling:
     two windows open at once once built the same 232,000-building map side by
     side, each taking the memory the other needed."""
-    project = Path(project)
+    project = Path(project).resolve()
     path = project / LOCK_FILE
-    try:
-        held = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        held = None
-    if isinstance(held, dict):
-        pid = int(held.get("pid") or 0)
-        if pid != os.getpid() and _pid_alive(pid):
-            raise RuntimeError(
-                f"{project.name} is already being {held.get('doing') or 'compiled'} "
-                f"(run {held.get('run')}, process {pid}) - by another KnoxMap window, or "
-                f"one still running after its window closed. Wait for that to finish, "
-                f"or stop it, rather than running two - they write the same files.")
-        if pid != os.getpid():
-            knoxlog.log.warning("%s [%s]: cleared a lock left by run %s (process %s is gone)",
-                                project.name, run, held.get("run"), pid)
-    try:
-        path.write_text(json.dumps({"pid": os.getpid(), "run": run, "doing": doing,
-                                    "started": time.time()}), encoding="utf-8")
-    except OSError:
-        pass                      # a lock that cannot be written is not a reason to stop
+    # The lock lives outside output so a failed first generation leaves
+    # nothing there, including on Windows where open files cannot be removed.
+    with _LOCK_GUARD:
+        if project in _HELD_LOCKS:
+            raise ProjectBusy(f"{project.name} is already being {_HELD_LOCKS[project][2]}.")
+        stream = _lock_path(project).open("a+b")
+        try:
+            try:
+                _lock_file(stream)
+            except OSError as exc:
+                raise ProjectBusy(f"{project.name} already has an operation in progress.") from exc
+            try:
+                held = json.loads(path.read_text(encoding="utf-8"))
+                pid = int(held.get("pid") or 0)
+            except (FileNotFoundError, ValueError, TypeError, AttributeError):
+                held, pid = {}, 0
+            # An older open KnoxMap process still uses only .compiling.
+            if pid != os.getpid() and _pid_alive(pid):
+                raise ProjectBusy(f"{project.name} is already being {held.get('doing') or 'compiled'}.")
+            path.write_text(json.dumps({"pid": os.getpid(), "run": run, "doing": doing,
+                                        "started": time.time()}), encoding="utf-8")
+            _HELD_LOCKS[project] = (run, stream, doing)
+        except BaseException:
+            stream.close()
+            raise
 
 
 def release(project: Path, run: str) -> None:
     """Let go of a lock taken with claim(), if it is still this run's."""
-    path = Path(project) / LOCK_FILE
-    try:
-        held = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-    if isinstance(held, dict) and held.get("run") == run:
+    project = Path(project).resolve()
+    with _LOCK_GUARD:
+        held = _HELD_LOCKS.get(project)
+        if held is None or held[0] != run:
+            return
         try:
-            path.unlink()
+            (project / LOCK_FILE).unlink(missing_ok=True)
         except OSError:
             pass
+        finally:
+            del _HELD_LOCKS[project]
+            held[1].close()
 
 
 @contextlib.contextmanager
@@ -936,8 +980,6 @@ def _source_stamp(project: Path) -> dict:
     """Everything the cell sources are made from, cheaply: the map's own files
     by size and time, when it was generated and built, and the code that turns
     them into cells. Any change means the sources are made again from nothing."""
-    import hashlib
-
     from knoxbuild import mapstate
     from tools.terrain_source import project_origin, rules_path
 
@@ -999,6 +1041,9 @@ def compile_rust(project_dir: str, on_progress=None, should_stop=None, workers: 
             on_phase(text, fraction)
 
     with _only_one(project, run):
+        incomplete = project / INCOMPLETE_LOTS
+        interrupted = _interrupted_publication(incomplete)
+        mark_lots_stale(project)
         try:
             # Said before the check, which reads every building file: on a city
             # that is most of an hour, and until a step was named the window
@@ -1017,7 +1062,7 @@ def compile_rust(project_dir: str, on_progress=None, should_stop=None, workers: 
             # are an hour and a half, and a crash at row 34 of 49 threw them all
             # away. The lot files knoxlots writes are always made afresh.
             # After prepare_output, so a project it repaired counts as changed.
-            cache = compile_cells.CellCache(project, exe, BASE_DIR, incremental, should_stop)
+            cache = compile_cells.CellCache(project, exe, BASE_DIR, incremental and not interrupted, should_stop)
             if cache.state is not None and not cache.changed:
                 if compile_cells.digest(cache.pzw) != cache.pzw_hash:
                     raise RuntimeError("The map changed during compilation. Compile it again.")
@@ -1025,6 +1070,7 @@ def compile_rust(project_dir: str, on_progress=None, should_stop=None, workers: 
                 if on_progress:
                     on_progress(cells, cells, cells)
                 knoxlog.log.info("compile %s [%s]: all %d compiled cells are current", project.name, run, cells)
+                incomplete.unlink()
                 finished = True
                 return cells
 
@@ -1048,17 +1094,21 @@ def compile_rust(project_dir: str, on_progress=None, should_stop=None, workers: 
                                  "the last run", project.name, run, kept)
 
             phase("Reading the buildings", 0.0)
+            phase_started = time.perf_counter()
             make_map_source(str(project), str(src), seams=True, workers=workers, should_stop=should_stop,
                             on_row=lambda n, rows: phase(f"Building the cells: row {n} of {rows}",
                                                          0.05 + 0.55 * n / rows),
                             on_start=lambda: phase("Building the cells", 0.05), resume=True,
                             select_cells=cache.select, track=True)
+            knoxlog.log.info("compile %s [%s]: made cell sources in %.3fs",
+                             project.name, run, time.perf_counter() - phase_started)
             built_cells = compile_cells.cells_from_sources(src)
             planned = cache.selected if cache.partial else cache.all_cells
             if built_cells != planned:
                 raise RuntimeError("The compile did not prepare all the selected cells")
             expected = compile_cells.lot_names(built_cells)
             total = len(expected) // 3
+            outputs = dict(cache.state["outputs"]) if cache.partial else {}
             if total:
                 phase(f"Writing lot files: 0 of {total} cells", 0.6)
 
@@ -1071,22 +1121,28 @@ def compile_rust(project_dir: str, on_progress=None, should_stop=None, workers: 
                 proc = _run_batch(cmd, should_stop or (lambda: False), time.time(), tick=tick)
                 if proc.returncode != 0:
                     raise RuntimeError(f"knoxlots failed (exit {proc.returncode}): {_why(proc)}")
-                if expected != {p.name for p in out.iterdir()}:
+                new_outputs = compile_cells.lot_hashes(out)
+                if (expected != {p.name for p in out.iterdir()}
+                        or expected != new_outputs.keys() or None in new_outputs.values()):
                     raise RuntimeError("knoxlots did not produce the expected files")
+                outputs.update(new_outputs)
             elif not cache.partial:
                 raise RuntimeError("knoxlots produced no cells")
             knoxstop.check(should_stop, "the compile")
             cache.verify_inputs()
             phase("Putting the lot files in the map", 0.95)
             lots = project / "lots"
+            incomplete.write_text("publishing", encoding="utf-8")
+            (project / compile_cells.CACHE).unlink(missing_ok=True)
             if not cache.partial:
                 for old in compile_cells.lot_paths(lots):
                     old.unlink()
             if total:
                 for f in out.iterdir():
                     os.replace(f, lots / f.name)
-            outputs = compile_cells.lot_hashes(lots)
             cache.save(src, outputs)
+            _record_failures(project, run, 0, [])
+            incomplete.unlink()
             cells = len(outputs) // 3
             if on_progress:
                 on_progress(cells, cells, cells)
@@ -1153,6 +1209,13 @@ def compile_map(project_dir: str, batch: int = 4, exe: str | None = None,
 
     with _only_one(project, run):
         lots = project / "lots"
+        incomplete = project / INCOMPLETE_LOTS
+        interrupted = _interrupted_publication(incomplete)
+        if interrupted and only_cells and not failed_cells(project):
+            only_cells = None
+        incomplete.write_text("publishing", encoding="utf-8")
+        from tools import compile_cells
+        (project / compile_cells.CACHE).unlink(missing_ok=True)
         prepare_output(project, run, knoxlots=False, should_stop=should_stop)
 
         w, h = world_size(pzw)
@@ -1167,6 +1230,10 @@ def compile_map(project_dir: str, batch: int = 4, exe: str | None = None,
         # that failed, and it must not throw away all the ones that did not.
         if fresh and not only_cells:
             cstate.wipe(project)
+        elif interrupted and not only_cells:
+            cstate.forget(project)
+            for old in compile_cells.lot_paths(lots):
+                old.unlink()
         now = None
         redo = None
         if only_cells or not incremental:
@@ -1366,6 +1433,8 @@ def compile_map(project_dir: str, batch: int = 4, exe: str | None = None,
         if failures:
             knoxlog.log.warning("compile %s [%s]: finished with %d of %d batches failed",
                                 project.name, run, len(failures), len(batches))
+        else:
+            incomplete.unlink()
         return len(list(lots.glob("*.lotheader")))
 
 

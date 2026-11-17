@@ -17,13 +17,23 @@ Layout and map.info fields follow an installed B42 workshop map (New Hartburg).
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import os
+from pathlib import Path
+import re
 import shutil
 import sys
+import tempfile
+import uuid
 
 LOT_PATTERNS = (".lotheader", ".lotpack")
 EXTRA_FILES = ("spawnpoints.lua", "objects.lua", "roomtones.lua",
                "worldmap.xml", "streets.xml", "worldmap-annotations.lua")
+
+
+class InvalidLots(RuntimeError):
+    pass
 
 
 def default_mods_dir() -> str:
@@ -880,33 +890,110 @@ def free_bytes(path: str) -> int:
 
 def package(project_dir: str, name: str, mod_id: str,
             lots_dir: str | None = None, mods_dir: str | None = None,
-            description: str = "", on_progress=None) -> tuple[str, int, list[str]]:
+            description: str = "", on_progress=None, *, project_locked=False) -> tuple[str, int, list[str]]:
     """Write the mod folder. Returns (mod_root, cell file count, extras).
 
     `on_progress(done, total)` follows the files being copied, which is
     nearly all of the time: a city is thousands of cell files, gigabytes."""
-    lots_dir = lots_dir or os.path.join(project_dir, "lots")
-    mods_dir = mods_dir or default_mods_dir()
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from knoxbuild import placement
+    from tools import compile_cells
+    from tools.compile_map import INCOMPLETE_LOTS, ProjectBusy, _lock_file, _lock_path, _only_one, failed_cells
 
-    cells, extras = collect(project_dir, lots_dir)
-    if not cells:
-        raise FileNotFoundError(
-            f"No compiled cell data in {lots_dir}. Run WorldEd's Generate Lots "
-            f"first.")
+    if not mod_id or mod_id.strip(" .") != mod_id or re.search(r'[<>:"/\\|?*\x00-\x1f]', mod_id):
+        raise ValueError("The mod ID must be a single folder name.")
+    project = Path(project_dir).resolve()
+    source = Path(lots_dir or project / "lots").resolve()
+    mods = Path(mods_dir or default_mods_dir()).resolve()
+    destination = mods / mod_id
+    target_map = Path("common", "media", "maps", folder_name(name, mod_id))
+    lock = contextlib.nullcontext() if project_locked else _only_one(project, uuid.uuid4().hex[:8], "installed")
+    with lock:
+        if source == (project / "lots").resolve():
+            if (project / INCOMPLETE_LOTS).exists() or failed_cells(project):
+                raise InvalidLots("The compiled map is out of date or incomplete. Compile it again before installing.")
+            where = placement.saved(str(project)) or placement.project_origin(str(project), project.name)
+            if not placement.lots_match(str(project), where):
+                raise InvalidLots("This map has been moved since it was last compiled. Compile it again, then install.")
+        cells, extras = collect(str(project), str(source))
+        _validate_cells(cells, source)
+        cache = project / compile_cells.CACHE
+        if source == (project / "lots").resolve() and cache.exists():
+            try:
+                expected = json.loads(cache.read_text(encoding="utf-8"))["outputs"]
+            except (ValueError, TypeError, KeyError) as exc:
+                raise InvalidLots("The compile record is damaged. Compile the map again before installing.") from exc
+            if expected != compile_cells.lot_hashes(source):
+                raise InvalidLots("The compiled cell files changed. Compile the map again before installing.")
+        mods.mkdir(parents=True, exist_ok=True)
+        with _lock_path(destination).open("a+b") as stream:
+            try:
+                _lock_file(stream)
+            except OSError as exc:
+                raise ProjectBusy(f"{mod_id} is already being installed.") from exc
+            return _stage_package(project, name, mod_id, destination, target_map, cells, extras,
+                                  description, on_progress)
 
-    mod_root = os.path.join(mods_dir, mod_id)
-    map_dir = os.path.join(mod_root, "common", "media", "maps",
-                           folder_name(name, mod_id))
-    # Clear the old map out first.
-    #
-    # Installing over a map that had been built again left every cell file
-    # from the run before it sitting beside the new ones. A map rebuilt
-    # smaller, or over a different area, then shipped cells from both: the
-    # game reads one cell's header with another cell's data, and falls over
-    # on the way in. Nothing in here is written by anything but this, so it
-    # all goes.
-    if os.path.isdir(map_dir):
-        _clear_folder(map_dir)
+
+def _validate_cells(cells, source):
+    names = {Path(f).name for f in cells}
+    coords = {name.removesuffix(".lotheader") for name in names if name.endswith(".lotheader")}
+    if not coords:
+        raise FileNotFoundError(f"No compiled cell data in {source}. Compile the map before installing.")
+    required = {name for xy in coords for name in
+                (f"{xy}.lotheader", f"world_{xy}.lotpack", f"chunkdata_{xy}.bin")}
+    if (required != names or any(not re.fullmatch(r"-?\d+_-?\d+", xy) for xy in coords)
+            or any(not os.path.isfile(path) or os.path.getsize(path) == 0 for path in cells)):
+        raise InvalidLots("The compiled cell files are incomplete. Compile the map again before installing.")
+
+
+def _stage_package(project, name, mod_id, destination, target_map, cells, extras,
+                   description, on_progress):
+    if _is_link(destination):
+        raise RuntimeError("The installed mod folder is a link. Choose a different mod ID.")
+    staging = Path(tempfile.mkdtemp(prefix=".knoxmap-install-", dir=destination.parent))
+    if staging.resolve().parent != destination.parent:
+        raise RuntimeError("The staged mod is outside the installation folder.")
+    new, backup = staging / "new", staging / "previous"
+    installed = False
+    try:
+        if destination.exists():
+            def keep_other_files(folder, names):
+                relative = Path(folder).relative_to(destination)
+                ignored = [entry for entry in names if relative / entry == target_map]
+                for entry in names:
+                    path = Path(folder, entry)
+                    if entry not in ignored and _is_link(path):
+                        raise RuntimeError(f"The installed mod contains a link at {path}.")
+                return ignored
+
+            shutil.copytree(destination, new, ignore=keep_other_files)
+        count, details = _write_package(str(project), name, mod_id, str(new), str(new / target_map),
+                                        cells, extras, description, on_progress)
+        try:
+            if destination.exists():
+                destination.rename(backup)
+            new.rename(destination)
+        except BaseException:
+            if backup.exists() and not destination.exists():
+                try:
+                    backup.rename(destination)
+                except OSError as exc:
+                    raise RuntimeError(f"The previous mod is saved at {backup}.") from exc
+            raise
+        installed = True
+        return str(destination), count, details
+    finally:
+        if installed or not backup.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def _is_link(path):
+    return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+
+
+def _write_package(project_dir, name, mod_id, mod_root, map_dir, cells, extras, description,
+                   on_progress):
     os.makedirs(map_dir, exist_ok=True)
 
     files = cells + extras
@@ -1048,7 +1135,7 @@ def package(project_dir: str, name: str, mod_id: str,
             f"building state against the {SAVE_BUFFER / 1e6:.1f} MB the game writes it "
             f"through. Every save will fail to store which buildings are explored or "
             f"alarmed. Generate a smaller area, or at a larger scale (metres per tile).")
-    return mod_root, n_cells, extra_names
+    return n_cells, extra_names
 
 
 def main(argv: list[str] | None = None) -> int:

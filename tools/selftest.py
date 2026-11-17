@@ -1112,7 +1112,11 @@ def main(argv: list[str]) -> int:
         print("install")
         lots = os.path.join(out, "lots")
         os.makedirs(lots, exist_ok=True)
-        open(os.path.join(lots, "0_0.lotheader"), "wb").write(b"stand-in")
+        from knoxbuild import placement
+        ox, oy = placement.project_origin(out, os.path.basename(out)) or (0, 0)
+        lx, ly = ox * 300 // 256, oy * 300 // 256
+        for file in (f"{lx}_{ly}.lotheader", f"world_{lx}_{ly}.lotpack", f"chunkdata_{lx}_{ly}.bin"):
+            Path(lots, file).write_bytes(b"stand-in")
         from make_map_mod import package
         mods = os.path.join(work, "mods")
         with contextlib.redirect_stdout(io.StringIO()):
@@ -1268,7 +1272,7 @@ def main(argv: list[str]) -> int:
         check(text.startswith("objects = {") and text.count('type = "ParkingStall"') == stalls
               and re.search(r'x = 2\d{4}, y = \d+, z = 0', text),
               "the parking stalls reach the game in objects.lua, at world tiles")
-        open(os.path.join(lots, "0_0.lotheader"), "wb").write(b"LOTH\x01\x00\x00\x00signs_erika_01_000\n")
+        Path(lots, f"{lx}_{ly}.lotheader").write_bytes(b"LOTH\x01\x00\x00\x00signs_erika_01_000\n")
         with contextlib.redirect_stdout(io.StringIO()):
             mod_root, cells, extras = package(out, "Selftest: Town", "selftest", mods_dir=mods)
         info_erika = open(os.path.join(mod_root, "mod.info"), encoding="utf-8").read()
