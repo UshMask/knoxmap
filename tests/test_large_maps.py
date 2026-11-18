@@ -246,15 +246,12 @@ class InstallingACity(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             project = os.path.join(d, "town")
             os.makedirs(os.path.join(project, "lots"))
-            files = []
-            for i in range(60):
-                path = os.path.join(project, "lots", f"world_{i}_0.lotpack")
-                Path(path).write_bytes(b"x")
-                files.append(path)
+            for i in range(20):
+                for name in (f"{i}_0.lotheader", f"world_{i}_0.lotpack", f"chunkdata_{i}_0.bin"):
+                    Path(project, "lots", name).write_bytes(b"x")
             seen = []
-            with mock.patch.object(K, "collect", return_value=(files, [])):
-                K.package(project, "town", "town", mods_dir=os.path.join(d, "mods"),
-                          on_progress=lambda done, total: seen.append((done, total)))
+            K.package(project, "town", "town", mods_dir=os.path.join(d, "mods"),
+                      on_progress=lambda done, total: seen.append((done, total)))
         self.assertEqual(seen, [(25, 60), (50, 60), (60, 60)])
 
 

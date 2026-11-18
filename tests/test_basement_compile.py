@@ -6,6 +6,8 @@ import shutil
 import struct
 import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -16,7 +18,8 @@ from knoxbuild.tbx import render_tbx
 from knoxbuild.world import Placement, render_pzw
 from tools.building_stats import read_header
 from tools.compile_cells import lot_hashes, lot_names
-from tools.compile_map import compile_map, compile_rust, knoxlots_exe
+from tools.compile_map import INCOMPLETE_LOTS, compile_map, compile_rust, knoxlots_exe, mark_lots_stale
+from tools.make_map_mod import InvalidLots, package
 from tools.map_source import project_origin, read_lots
 
 from tests.basement_town import build_town
@@ -90,8 +93,6 @@ class BasementLotsCompile(unittest.TestCase):
         return project
 
     def test_moving_a_building_rebuilds_both_cells_and_matches_a_full_compile(self):
-        from pathlib import Path
-
         project = self._copy("move")
         ox, oy = project_origin(project)
         boundary = (ox // SIDE + 1) * SIDE - ox
@@ -114,6 +115,7 @@ class BasementLotsCompile(unittest.TestCase):
         moved, count = re.subn(pattern, lambda m: f"{m[1]}{boundary + 4}{m[2]}", layout)
         self.assertEqual(count, 1)
         pzw.write_text(moved, encoding="utf-8")
+        mark_lots_stale(Path(project))
 
         phases = []
         compile_rust(project, workers=1, on_phase=lambda text, _: phases.append(text))
@@ -164,6 +166,33 @@ class BasementLotsCompile(unittest.TestCase):
         compile_rust(project, workers=1, on_phase=lambda text, _: phases.append(text))
         self.assertIn(f"Writing lot files: 0 of {len(expected) // 3} cells", phases)
         self.assertEqual(lot_hashes(lots), expected)
+
+    def test_interrupted_publication_refuses_install_and_recovers(self):
+        project = Path(self._copy("interrupted"))
+        lots = project / "lots"
+        compile_rust(str(project), workers=1)
+        expected = lot_hashes(lots)
+        replace = os.replace
+        published = []
+
+        def fail_after_one_file(source, target):
+            if Path(target).parent == lots:
+                if published:
+                    raise OSError("interrupted publication")
+                published.append(target)
+            return replace(source, target)
+
+        with mock.patch("tools.compile_map.os.replace", side_effect=fail_after_one_file):
+            with self.assertRaisesRegex(OSError, "interrupted publication"):
+                compile_rust(str(project), workers=1, incremental=False)
+        self.assertEqual(len(published), 1)
+        self.assertTrue((project / INCOMPLETE_LOTS).exists())
+        with self.assertRaises(InvalidLots):
+            package(str(project), "Town", "town", mods_dir=os.path.join(self.work, "mods"))
+
+        compile_rust(str(project), workers=1)
+        self.assertEqual(lot_hashes(lots), expected)
+        self.assertFalse((project / INCOMPLETE_LOTS).exists())
 
     def test_a_basement_lot_compiles_to_level_minus_1(self):
         project = self._copy("one")
