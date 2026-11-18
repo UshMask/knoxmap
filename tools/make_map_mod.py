@@ -898,7 +898,8 @@ def package(project_dir: str, name: str, mod_id: str,
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from knoxbuild import placement
     from tools import compile_cells
-    from tools.compile_map import INCOMPLETE_LOTS, ProjectBusy, _lock_file, _lock_path, _only_one, failed_cells
+    from tools.compile_map import (INCOMPLETE_LOTS, ProjectBusy, _interrupted_publication,
+                                   _lock_file, _lock_path, _only_one, failed_cells)
 
     if not mod_id or mod_id.strip(" .") != mod_id or re.search(r'[<>:"/\\|?*\x00-\x1f]', mod_id):
         raise ValueError("The mod ID must be a single folder name.")
@@ -909,8 +910,10 @@ def package(project_dir: str, name: str, mod_id: str,
     target_map = Path("common", "media", "maps", folder_name(name, mod_id))
     lock = contextlib.nullcontext() if project_locked else _only_one(project, uuid.uuid4().hex[:8], "installed")
     with lock:
-        if source == (project / "lots").resolve():
-            if (project / INCOMPLETE_LOTS).exists() or failed_cells(project):
+        default_source = source == (project / "lots").resolve()
+        marker = project / INCOMPLETE_LOTS
+        if default_source:
+            if _interrupted_publication(marker) or failed_cells(project):
                 raise InvalidLots("The compiled map is out of date or incomplete. Compile it again before installing.")
             where = placement.saved(str(project)) or placement.project_origin(str(project), project.name)
             if not placement.lots_match(str(project), where):
@@ -918,7 +921,10 @@ def package(project_dir: str, name: str, mod_id: str,
         cells, extras = collect(str(project), str(source))
         _validate_cells(cells, source)
         cache = project / compile_cells.CACHE
-        if source == (project / "lots").resolve() and cache.exists():
+        reconcile = None
+        if default_source and marker.exists():
+            reconcile = _worlded_reconciliation(project, source, cells, marker, cache)
+        elif default_source and cache.exists():
             try:
                 expected = json.loads(cache.read_text(encoding="utf-8"))["outputs"]
             except (ValueError, TypeError, KeyError) as exc:
@@ -932,7 +938,44 @@ def package(project_dir: str, name: str, mod_id: str,
             except OSError as exc:
                 raise ProjectBusy(f"{mod_id} is already being installed.") from exc
             return _stage_package(project, name, mod_id, destination, target_map, cells, extras,
-                                  description, on_progress)
+                                  description, on_progress, reconcile)
+
+
+def _worlded_reconciliation(project, source, cells, marker, cache):
+    import struct
+    from xml.etree.ElementTree import ParseError
+
+    import knoxfiles
+    from knoxbuild import mapstate
+    from tools import compile_state
+
+    def snapshot(paths):
+        try:
+            return compile_state.worlded_export(project, paths, marker)
+        except (OSError, ValueError, KeyError, ParseError) as exc:
+            raise InvalidLots(f"WorldEd export is out of date or incomplete. "
+                              f"Run BMP to TMX and Generate Lots for all cells. {exc}") from exc
+
+    before = snapshot(cells)
+
+    def reconcile(staged):
+        try:
+            outputs = compile_state.worlded_lot_hashes(staged)
+        except (OSError, ValueError, IndexError, struct.error) as exc:
+            raise InvalidLots(f"WorldEd export is damaged or incomplete. "
+                              f"Generate Lots for all cells again. {exc}") from exc
+        current, _ = collect(str(project), str(source))
+        if outputs.keys() != {Path(path).name for path in cells} or snapshot(current) != before:
+            raise InvalidLots("The WorldEd export changed during installation. "
+                              "Wait for Generate Lots to finish, then install again.")
+        # The native and CLI dependency records describe the previous output.
+        # Keep just the verified hashes so a later install detects damage.
+        compile_state.forget(project)
+        knoxfiles.write(str(cache), {"outputs": outputs})
+        mapstate.stamp(str(project), "compile")
+        marker.unlink()
+
+    return reconcile
 
 
 def _validate_cells(cells, source):
@@ -948,7 +991,7 @@ def _validate_cells(cells, source):
 
 
 def _stage_package(project, name, mod_id, destination, target_map, cells, extras,
-                   description, on_progress):
+                   description, on_progress, reconcile):
     if _is_link(destination):
         raise RuntimeError("The installed mod folder is a link. Choose a different mod ID.")
     staging = Path(tempfile.mkdtemp(prefix=".knoxmap-install-", dir=destination.parent))
@@ -970,6 +1013,8 @@ def _stage_package(project, name, mod_id, destination, target_map, cells, extras
             shutil.copytree(destination, new, ignore=keep_other_files)
         count, details = _write_package(str(project), name, mod_id, str(new), str(new / target_map),
                                         cells, extras, description, on_progress)
+        if reconcile:
+            reconcile(new / target_map)
         try:
             if destination.exists():
                 destination.rename(backup)

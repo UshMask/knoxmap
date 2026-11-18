@@ -26,6 +26,8 @@ import hashlib
 import json
 import os
 import re
+import struct
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 CELL = 300          # tiles in one cell of the world, as the .pzw counts them
@@ -171,6 +173,156 @@ def lot_files_of(cells, origin: tuple[int, int]) -> set[tuple[int, int]]:
             for ly in range(y0 // LOT, (y0 + CELL - 1) // LOT + 1):
                 out.add((lx, ly))
     return out
+
+
+def worlded_export(project: Path, paths: list[str], marker: Path) -> tuple:
+    """Require every lot to postdate the last build and its WorldEd inputs.
+
+    Stock WorldEd does not write a KnoxMap completion record. A full export
+    replaces all three files for every lot coordinate. A cancelled or selected
+    export can leave older triples mixed in with the new ones.
+    """
+    import knoxpaths
+    from tools.compile_cells import lot_names
+
+    def local(name: str) -> Path:
+        # Wine's default Z: drive is the host filesystem.
+        if os.name != "nt" and name[:3].lower() == "z:/":
+            name = name[2:]
+        return project / name
+
+    def snapshot(path: Path) -> tuple:
+        st = path.stat()
+        return path, st.st_mtime_ns, st.st_size, st.st_ino
+
+    pzw = project / f"{project.name}.pzw"
+    before = snapshot(pzw)
+    world = ET.parse(pzw).getroot()
+    origin = world.find("./GenerateLots/worldOrigin")
+    bitmap = world.find("bmp")
+    if world.tag != "world" or origin is None or bitmap is None:
+        raise ValueError("The WorldEd project is missing its origin or bitmap.")
+    w, h = int(world.attrib["width"]), int(world.attrib["height"])
+    ox, oy = map(int, origin.attrib["origin"].split(","))
+    ground = local(bitmap.attrib["path"])
+    vegetation = ground.with_name(f"{ground.stem}_veg.bmp")
+    terrain = [snapshot(ground), snapshot(vegetation)]
+    tools = knoxpaths.mapping_tools_dir()
+    if tools:
+        terrain += [snapshot(p) for p in (tools / "config" / "Rules.txt",
+                                          tools / "config" / "Blends.txt") if p.is_file()]
+    inputs = [before, snapshot(marker), *terrain]
+    spawn = world.find("./GenerateLots/ZombieSpawnMap")
+    if spawn is not None and spawn.get("path"):
+        inputs.append(snapshot(local(spawn.attrib["path"])))
+    inputs.extend(snapshot(local(name)) for name in sorted({
+        lot.attrib["map"] for lot in world.findall("./cell/lot")
+    }))
+    maps = {(int(cell.attrib["x"]), int(cell.attrib["y"])): cell.get("map")
+            for cell in world.findall("cell")}
+    coords = [(x, y) for y in range(h) for x in range(w)]
+    if not coords or {Path(path).name for path in paths} != lot_names(lot_files_of(coords, (ox, oy))):
+        raise ValueError("WorldEd has not exported the entire map.")
+    terrain_time = max(p[1] for p in terrain)
+    converted = [snapshot(local(maps[x, y]) if maps.get((x, y)) else
+                          project / "tmx" / f"{ground.stem}_{ox + x}_{oy + y}.tmx")
+                 for x, y in coords]
+    if any(tmx[1] < terrain_time for tmx in converted):
+        raise ValueError("The converted maps are out of date.")
+    inputs.extend(converted)
+    if tools:
+        settings = tools / "settings" / "PZTools.ini"
+        if settings.is_file():
+            inputs.append(snapshot(settings))
+
+    outputs = [snapshot(Path(path)) for path in paths]
+    if min(p[1] for p in outputs) <= max(p[1] for p in inputs):
+        raise ValueError("Some of the lot files are out of date.")
+    return inputs, outputs
+
+
+def worlded_lot_hashes(folder: Path) -> dict:
+    """Validate the staged Build 42 files before recording their hashes."""
+    from tools.compile_cells import lot_paths
+
+    hashes = {}
+    for header in folder.glob("*.lotheader"):
+        xy = header.stem
+        data = header.read_bytes()
+        if data[:8] != b"LOTH\x01\0\0\0":
+            raise ValueError(f"Invalid lot header: {header.name}")
+        tiles, = struct.unpack_from("<I", data, 8)
+        pos = 12
+        for _ in range(tiles):
+            pos = data.index(b"\n", pos) + 1
+        cw, ch, lo, hi, rooms = struct.unpack_from("<IIiiI", data, pos)
+        if (cw, ch) != (8, 8) or not -32 <= lo <= hi < 32:
+            raise ValueError(f"Invalid lot dimensions: {header.name}")
+        pos += 20
+        for _ in range(rooms):
+            pos = data.index(b"\n", pos) + 1
+            _, rects = struct.unpack_from("<iI", data, pos)
+            pos += 8 + 16 * rects
+            objects, = struct.unpack_from("<I", data, pos)
+            pos += 4 + 12 * objects
+        buildings, = struct.unpack_from("<I", data, pos)
+        pos += 4
+        for _ in range(buildings):
+            count, = struct.unpack_from("<I", data, pos)
+            pos += 4
+            if count > (len(data) - pos) // 4:
+                raise ValueError(f"Invalid building: {header.name}")
+            if any(room >= rooms for room in struct.unpack_from(f"<{count}I", data, pos)):
+                raise ValueError(f"Invalid room reference: {header.name}")
+            pos += 4 * count
+        if len(data) - pos != 1024:
+            raise ValueError(f"Incomplete lot header: {header.name}")
+        hashes[header.name] = hashlib.sha256(data).hexdigest()
+
+        pack = folder / f"world_{xy}.lotpack"
+        data = pack.read_bytes()
+        if data[:12] != struct.pack("<4sII", b"LOTP", 1, 1024):
+            raise ValueError(f"Invalid lot pack: {pack.name}")
+        offsets = (*struct.unpack_from("<1024Q", data, 12), len(data))
+        if offsets[0] != 12 + 1024 * 8:
+            raise ValueError(f"Invalid lot offsets: {pack.name}")
+        for start, end in zip(offsets[:-1], offsets[1:], strict=True):
+            if start >= end or end > len(data):
+                raise ValueError(f"Invalid lot offsets: {pack.name}")
+            pos, squares = start, 0
+            while pos < end:
+                count, value = struct.unpack_from("<ii", data, pos)
+                if count == -1 and value > 0:
+                    squares += value
+                    pos += 8
+                elif 1 <= count <= (end - pos - 4) // 4 and -1 <= value < rooms:
+                    ids = struct.unpack_from(f"<{count - 1}I", data, pos + 8)
+                    if any(tile >= tiles for tile in ids):
+                        raise ValueError(f"Invalid tile reference: {pack.name}")
+                    squares += 1
+                    pos += 4 + 4 * count
+                else:
+                    raise ValueError(f"Invalid lot squares: {pack.name}")
+            if pos != end or squares != 64 * (hi - lo + 1):
+                raise ValueError(f"Incomplete lot chunk: {pack.name}")
+        hashes[pack.name] = hashlib.sha256(data).hexdigest()
+
+        chunkdata = folder / f"chunkdata_{xy}.bin"
+        data = chunkdata.read_bytes()
+        if data[:2] != b"\0\x01":
+            raise ValueError(f"Invalid chunk data: {chunkdata.name}")
+        pos = 2
+        for _ in range(1024):
+            kind = data[pos]
+            if kind > 5:
+                raise ValueError(f"Invalid chunk data: {chunkdata.name}")
+            pos += 65 if kind == 2 else 1
+        if pos != len(data):
+            raise ValueError(f"Incomplete chunk data: {chunkdata.name}")
+        hashes[chunkdata.name] = hashlib.sha256(data).hexdigest()
+    if not hashes or hashes.keys() != {p.name for p in lot_paths(folder)}:
+        raise ValueError("The staged lot files are incomplete.")
+    return hashes
 
 
 def plan(old: dict | None, new: dict, lots_present: bool) -> dict | None:

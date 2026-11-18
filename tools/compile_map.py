@@ -665,7 +665,7 @@ class ProjectBusy(RuntimeError):
 
 def mark_lots_stale(project: Path) -> None:
     marker = project / INCOMPLETE_LOTS
-    if not marker.exists():
+    if not _interrupted_publication(marker):
         marker.write_text("stale", encoding="utf-8")
 
 

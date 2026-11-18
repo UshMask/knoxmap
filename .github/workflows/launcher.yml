@@ -72,9 +72,25 @@ jobs:
         run: |
           chmod +x win/build_launcher.sh
           win/build_launcher.sh
-          file KnoxMap.exe
-          file KnoxMap.exe | grep -qE 'PE32\+ executable \(GUI\) x86-64' ||
-            { echo "not a windowed 64-bit exe"; exit 1; }
+      - name: Verify the x86-64 GUI executable
+        run: |
+          python3 - <<'PY'
+          import struct
+          from pathlib import Path
+
+          data = Path("KnoxMap.exe").read_bytes()
+          pe, = struct.unpack_from("<I", data, 0x3c)
+          signature, machine, _, _, _, _, size, flags = struct.unpack_from("<4sHHIIIHH", data, pe)
+          optional = pe + 24
+          magic, = struct.unpack_from("<H", data, optional)
+          subsystem, = struct.unpack_from("<H", data, optional + 68)
+          # IMAGE_FILE_EXECUTABLE_IMAGE without IMAGE_FILE_DLL, PE32+, Windows GUI.
+          if (data[:2] != b"MZ" or signature != b"PE\0\0" or machine != 0x8664
+                  or flags & 0x2002 != 0x0002 or size < 112 or optional + size > len(data)
+                  or magic != 0x20b or subsystem != 2):
+              raise SystemExit("KnoxMap.exe is not an x86-64 Windows GUI executable")
+          print("Verified KnoxMap.exe: PE32+, x86-64, Windows GUI")
+          PY
 
   run_it:
     name: Run it on Windows
