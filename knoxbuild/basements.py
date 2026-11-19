@@ -154,8 +154,17 @@ def reserve(rows: list[dict], settings, region: str | None, areas, rng: random.R
         return out
     # Bases first, biggest building first, so the bunker under a site goes to
     # its barracks and not to a guard hut too small to take the stairs; the
-    # rest in build order. The house share is rolled in build order regardless.
-    rolls = [rng.random() for _ in rows]
+    # rest in build order. Parts of a sectional house share its original roll.
+    rolls = []
+    group_rolls = {}
+    for row in rows:
+        group = row.get("basement_group")
+        if group is None:
+            rolls.append(rng.random())
+        else:
+            if group not in group_rolls:
+                group_rolls[group] = rng.random()
+            rolls.append(group_rolls[group])
 
     def first(i):
         r = rows[i]
@@ -281,7 +290,8 @@ WELL_TRIES = {"stairwell": [[(None, True)], [(None, False)], [(-1, True), (1, Tr
 
 
 def find_stair_spot(ground, under: np.ndarray, kinds: tuple[str, ...] | None,
-                    avoid: set, well: str | None = None):
+                    avoid: set, well: str | None = None, *, public_only: bool = False,
+                    blocked_walk: set | None = None):
     """(x, y, dir, lane, door) on the ground floor where a flight can come up
     from below.
 
@@ -308,7 +318,10 @@ def find_stair_spot(ground, under: np.ndarray, kinds: tuple[str, ...] | None,
 
     def room_kind(x, y):
         v = grid[y][x]
-        return ground.rooms[v - 1].kind if v else None
+        room = ground.rooms[v - 1] if v else None
+        if public_only and (room is None or not room.is_core or room.unit):
+            return None
+        return room.kind if room else None
 
     def ok(x, y, d):
         run = _top(x, y, d)
@@ -343,6 +356,8 @@ def find_stair_spot(ground, under: np.ndarray, kinds: tuple[str, ...] | None,
             return None
         # What is left of the room still hangs together.
         rest = {(a, b) for b in range(h) for a in range(w) if grid[b][a] == r} - set(sq)
+        if blocked_walk:
+            rest -= blocked_walk
         if not rest:
             return None
         start = min(rest)
@@ -362,7 +377,7 @@ def find_stair_spot(ground, under: np.ndarray, kinds: tuple[str, ...] | None,
         for la, lb in landing:
             for ex, ey in ends:
                 o = (la + ex, lb + ey)
-                if o in sq or at(*o) != r or o in blocked:
+                if o not in rest or o in blocked:
                     continue
                 door = (la, max(lb, o[1]), "N") if ex == 0 else (max(la, o[0]), lb, "W")
                 return sq, door, o
@@ -401,19 +416,22 @@ def find_stair_spot(ground, under: np.ndarray, kinds: tuple[str, ...] | None,
         return min(ranked)[1] if ranked else None
 
     for lanes in WELL_TRIES.get(well, [["open"]]):
+        if public_only and lanes == ["open"]:
+            continue
         got = best(lanes)
         if got:
             return got
         # Not in a room it was meant for: in a bedroom, behind a door, still
         # against a wall if there is one.
-        if lanes != ["open"] and kinds is not None:
+        if not public_only and lanes != ["open"] and kinds is not None:
             got = best(lanes, loose=True)
             if got:
                 return got
     return None
 
 
-def plan_basement(parent, spec: BasementSpec, seed: int, settings) -> Basement | None:
+def plan_basement(parent, spec: BasementSpec, seed: int, settings, *,
+                  public_only: bool = False) -> Basement | None:
     """Lay out `spec` under `parent` (a layout.Building), or None when the
     ground floor has nowhere for the stairs. On success the parent's ground
     floor is cleared over the flight and opened (Plan.holes)."""
@@ -429,13 +447,16 @@ def plan_basement(parent, spec: BasementSpec, seed: int, settings) -> Basement |
                 bx = x - spec.dx
                 if 0 <= bx < w:
                     under[y, x] = spec.mask[by, bx]
-    avoid = {c for s in parent.stairs for c in _run(*s)}
+    flights = parent.stairs[:1] if public_only else parent.stairs
+    avoid = {c for s in flights for c in _run(*s)}
+    blocked_walk = set(_run(*flights[0])[1:-1]) if public_only and flights else None
     kinds = STAIR_ROOMS if spec.tier == "house" else None
     # Homes and works go down behind a door at the top of the stairs; other
     # buildings' stairs come up in a stair hall of their own.
     well = ("stairwell" if spec.tier == "house"
             or (spec.tier == "large" and spec.kind == "industrial") else "hall")
-    spot = find_stair_spot(ground, under, kinds, avoid, well)
+    spot = find_stair_spot(ground, under, kinds, avoid, well,
+                          public_only=public_only, blocked_walk=blocked_walk)
     if spot is None:
         return None
     sx, sy, d, lane, door = spot

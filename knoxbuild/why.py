@@ -1,4 +1,4 @@
-"""Why a footprint did not become a building, in words.
+"""What the build did with a footprint, in words.
 
 The build keeps a row per footprint it left out (`<map>_left_out.csv`, written
 by knoxbuild/build.py). This turns one of those rows into something a person
@@ -118,7 +118,27 @@ def for_id(folder: str, osm_id) -> dict:
                 "tile_y": row.get("tile_y") or "",
                 "osm_id": wanted,
             }
-    return {"state": "built", "osm_id": wanted}
+    answer = {"state": "built", "osm_id": wanted}
+    storeys = []
+    sections: dict[str, set[str]] = {}
+    for row in read_rows(placements_path(folder)):
+        if row.get("osm_id") != wanted or not row.get("level_source"):
+            continue
+        if row.get("entrance_section") and row.get("entrance_source"):
+            sections.setdefault(row["entrance_source"], set()).add(row["entrance_section"])
+        try:
+            levels = int(row["levels"])
+        except (KeyError, ValueError):
+            continue
+        detail = {"levels": levels, "source": row["level_source"]}
+        if detail not in storeys:
+            storeys.append(detail)
+    if storeys:
+        answer["storeys"] = storeys
+    if sections:
+        answer["entrances"] = [{"count": len(parts), "source": source}
+                               for source, parts in sections.items()]
+    return answer
 
 
 def counts(folder: str) -> dict:

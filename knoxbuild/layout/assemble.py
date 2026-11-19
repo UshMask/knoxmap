@@ -36,7 +36,8 @@ def build_building(width: int, height: int, levels: int = 1,
                    entrances: list[tuple[float, float, dict]] | None = None,
                    profile: object | None = None,
                    mapped: list | None = None,
-                   garage_door: bool = False) -> Building:
+                   garage_door: bool = False,
+                   section: tuple | None = None) -> Building:
     """Lay out a building of `levels` storeys.
 
     `retail` puts shops on the ground floor of a block of flats, as on any
@@ -63,7 +64,10 @@ def build_building(width: int, height: int, levels: int = 1,
     if tower_mod.qualifies(kind, levels, width, height):
         tcore = tower_mod.pick_core(width, height, mask,
                                     random.Random(seed ^ 0x70E2))
-    if tcore is not None:
+    if section is not None:
+        core, _door = section
+        corridor = True
+    elif tcore is not None:
         core = tcore.stair
     elif kind == "apartment":
         core = _pick_corridor(width, height, mask, rng)
@@ -90,6 +94,14 @@ def build_building(width: int, height: int, levels: int = 1,
         levels = 1          # nowhere to put a staircase, so one floor it is
 
     stairs = _stairs_in_core(core) if core is not None and levels > 1 else None
+    flights = [stairs] * (levels - 1) if stairs is not None else []
+    if section is not None and flights:
+        from ..apartment_sections import turning_flights
+
+        pair = turning_flights(core)
+        if pair is not None:
+            flights = [pair[level % 2] for level in range(levels - 1)]
+            stairs = flights[0]
     shaft = shaft_door = None
     if tcore is not None:
         shaft, shaft_door = tcore.lifts[0]
@@ -103,8 +115,8 @@ def build_building(width: int, height: int, levels: int = 1,
     # cut through them on the upper floors.
     lifts = ([r for r, _ in tcore.lifts] + [r for r, _ in tcore.service]
              if tcore is not None else [shaft])
-    upper_mask, setback_at = _setback(width, height, mask, levels, core, lifts,
-                                      corridor)
+    upper_mask, setback_at = (None, 0) if section is not None else _setback(
+        width, height, mask, levels, core, lifts, corridor)
     # Shops under flats where the town is dense, and wherever the map puts a
     # shop, a restaurant or a bank in a building that is more than one.
     shops = tcore is None and kind in ("apartment", "civic") and core is not None and (
@@ -130,7 +142,8 @@ def build_building(width: int, height: int, levels: int = 1,
                           kind="retail" if shops and lvl == 0 else kind,
                           mask=upper_mask if setback_at and lvl >= setback_at else mask,
                           ground=(lvl == 0), settings=settings,
-                          core=core, level=lvl, levels=levels, stairs=stairs,
+                          core=core, level=lvl, levels=levels,
+                          stairs=flights[min(lvl, len(flights) - 1)] if flights else None,
                           corridor=corridor, shaft=shaft, shaft_door=shaft_door,
                           street=street, uses=uses, hotel=hotel,
                           extra_shafts=tcore.lifts[1:] if tcore is not None else None,
@@ -139,18 +152,18 @@ def build_building(width: int, height: int, levels: int = 1,
                           entrances=entrances if lvl == 0 else None,
                           profile=profile, mapped=mapped,
                           garage_door=garage_door and lvl == 0,
-                          party={e for e, up in (party or {}).items() if lvl < up})
+                          party={e for e, up in (party or {}).items() if lvl < up},
+                          section_door=section[1] if section is not None else None)
 
     # The ground floor first: a mansion's floors above it are opened over its
     # hall, and that has to be known before they are laid out.
     storeys = [_storey(lvl) for lvl in range(levels)]
     building = Building(width=width, height=height, storeys=storeys, profile=profile,
                         grand=bool(storeys) and storeys[0].grand)
-    if stairs is not None:
-        for lvl in range(levels - 1):
-            building.stairs.append(stairs)
-            _clear_for_stairs(storeys[lvl], *stairs)
-            _clear_for_stairs(storeys[lvl + 1], *stairs)
+    for lvl, flight in enumerate(flights):
+        building.stairs.append(flight)
+        _clear_for_stairs(storeys[lvl], *flight)
+        _clear_for_stairs(storeys[lvl + 1], *flight)
     # Windows last and for the whole building at once, so they stack in
     # columns instead of each floor scattering its own.
     _place_windows(building, kind, shop_ground=shops)
@@ -159,6 +172,13 @@ def build_building(width: int, height: int, levels: int = 1,
     # Last of all, because it is the furnished building that has to be
     # walkable, not the plan.
     _clear_the_way(building)
+    if section is not None:
+        for storey in storeys:
+            public = {i for i, room in enumerate(storey.rooms, 1) if room.is_core}
+            storey.furniture = [
+                f for f in storey.furniture
+                if _is_wall_piece(f[0]) or not any(
+                    _room_at(storey, x, y) in public for x, y in _cells_for(*f))]
     from .. import interiors
     interiors.one_wood(building, random.Random(f"{seed}:wood"))
     return building
@@ -368,7 +388,8 @@ def build_plan(width: int, height: int, commercial: bool = False,
                mapped: list | None = None,
                tower: "TowerCore | None" = None,
                plant: bool = False,
-               garage_door: bool = False) -> Plan:
+               garage_door: bool = False,
+               section_door: tuple[int, int, str] | None = None) -> Plan:
     """Lay out and furnish one storey of the given tile size.
 
     `uses` are what OpenStreetMap says a commercial ground floor holds
@@ -544,7 +565,15 @@ def build_plan(width: int, height: int, commercial: bool = False,
     _doors(plan, rng, stairs=stairs)
     if mix_kind == "mall":
         _mall_doors(plan, rng, ground)
-    if ground and tower is not None:
+    if ground and section_door is not None:
+        doors = [edge for i, room in enumerate(plan.rooms, 1) if room.is_core
+                 for _side, run in _outside_runs(plan, i) for edge in run]
+        if not doors:
+            raise ValueError("Apartment staircase has no exit to the street")
+        x, y, direction = section_door
+        plan.doors.append(min(doors, key=lambda e: (
+            abs(e[0] - x) + abs(e[1] - y), e[2] != direction, e)))
+    elif ground and tower is not None:
         _tower_entrance(plan, rng, street, entrances)
     elif ground:
         _exterior_door(plan, rng, avoid=_stair_foot(stairs), street=street,

@@ -3080,17 +3080,18 @@ def _doors_off_stairs(building: "Building") -> int:
     """
     if not building.stairs:
         return 0
-    x, y, d = building.stairs[0]
-    dx, dy = (0, 1) if d == "N" else (1, 0)
-    steps = {(x + dx * i, y + dy * i) for i in range(1, STAIR_RUN - 1)}
-
-    def on_steps(door) -> bool:
-        dxx, dyy, dd = door
-        before = (dxx - 1, dyy) if dd == "W" else (dxx, dyy - 1)
-        return (dxx, dyy) in steps or before in steps
-
     moved = 0
-    for storey in building.storeys:
+    for level, storey in enumerate(building.storeys):
+        steps = set()
+        for x, y, d in building.stairs[max(0, level - 1):level + 1]:
+            dx, dy = (0, 1) if d == "N" else (1, 0)
+            steps.update((x + dx * i, y + dy * i) for i in range(1, STAIR_RUN - 1))
+
+        def on_steps(door) -> bool:
+            dxx, dyy, dd = door
+            before = (dxx - 1, dyy) if dd == "W" else (dxx, dyy - 1)
+            return (dxx, dyy) in steps or before in steps
+
         bad = [i for i, door in enumerate(storey.doors) if on_steps(door)]
         if not bad:
             continue
@@ -3333,8 +3334,8 @@ def _clear_the_way(building: "Building") -> int:
     """
     _doors_off_stairs(building)
     removed = sum(_off_the_doorways(storey) for storey in building.storeys)
-    stairs = building.stairs[0] if building.stairs else None
     for level, storey in enumerate(building.storeys):
+        stairs = building.stairs[min(level, len(building.stairs) - 1)] if building.stairs else None
         _make_way_for_windows(storey, stairs)
         starts = _ways_in(building, level, storey)
         if not starts:

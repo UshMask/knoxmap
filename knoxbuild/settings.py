@@ -122,6 +122,8 @@ class Settings(StreetSettings):
     # the gap. Roads, rivers, woods and the terrain are still exactly as
     # mapped - only the housing is the game's rather than the survey's.
     true_map: int = 1
+    # Guess stairwell positions for long apartment blocks when OSM is silent.
+    estimate_stairwells: int = 0
     # Fill in the buildings OpenStreetMap has not got, from Overture Maps
     # (generator/overture.py). OSM is drawn by people, so how much of a town
     # is on it depends on who lives there: all of a German one, the high
@@ -361,6 +363,7 @@ LIMITS = {
     "terrain_only": (0, 1),
     "seed": (0, 2 ** 31 - 1),
     "true_map": (0, 1),
+    "estimate_stairwells": (0, 1),
     "fill_gaps": (0, 1),
     "fill_frontage": (0, 2),
     "guaranteed_rifle": (0, 1),

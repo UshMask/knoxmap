@@ -226,10 +226,15 @@ function describeTags(tags) {
   return first ? `${first[0]}=${first[1]}` : 'something';
 }
 
-// Why the building that was just clicked is not on the map - the question
-// everybody asks about a gap where their own house should be. The build keeps
-// the answer per footprint; this is only the asking (web/zones.py, and
-// tools/why_no_building.py for a whole area at once).
+const STOREY_SOURCES = {
+  levels_tag: 'recorded storey count',
+  height_tag: 'calculated from recorded height',
+  neighbours: 'estimated from nearby buildings',
+  estimate: 'estimated by KnoxMap',
+  preset: 'hand-built preset',
+};
+
+// The build keeps the answer per footprint. Ask about the one just clicked.
 async function showWhy(layer, tags) {
   const box = document.getElementById('editWhy');
   if (!box || !openedMap || !(tags || {}).building) return;
@@ -256,6 +261,20 @@ async function showWhy(layer, tags) {
   } else if (data.state === 'built') {
     box.className = 'why why-in';
     box.textContent = 'This one was built.';
+    for (const { levels, source } of data.storeys || []) {
+      const reason = STOREY_SOURCES[source];
+      if (!reason) continue;
+      const detail = document.createElement('div');
+      detail.textContent = `Storeys: ${levels} (${reason})`;
+      box.appendChild(detail);
+    }
+    for (const { count, source } of data.entrances || []) {
+      const detail = document.createElement('div');
+      detail.textContent = source === 'mapped'
+        ? `Stairwells: ${count} (mapped entrances)`
+        : `Stairwells: ${count} (estimated from the facade)`;
+      box.appendChild(detail);
+    }
   } else {
     box.className = 'why';
     box.textContent = 'This map was generated before KnoxMap kept these '

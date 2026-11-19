@@ -325,7 +325,7 @@ def _cut_big(units: list, metres_per_tile: float,
 
 def row_units(fp, special: str | None, btag: str, n_uses: int,
               metres_per_tile: float, max_side: int | None = None,
-              split: bool = True):
+              split: bool = True, *, true_map: bool = False):
     """One footprint per unit of a row, or the footprint as it stands.
 
     `max_side` (see _cut_big) is passed only for a footprint that was too
@@ -337,10 +337,11 @@ def row_units(fp, special: str | None, btag: str, n_uses: int,
     otherwise become a dozen buildings, and a ceiling that counts footprints
     while the map counts shopfronts is not the number anybody asked for. A
     row then stays the one building the survey drew.
+    True map mode also keeps surveyed apartment blocks whole.
     """
     from .footprint import split_row
 
-    if not split:
+    if not split or (true_map and (special == "apartment" or btag == "apartments")):
         return _cut_big([fp], metres_per_tile, max_side)
 
     if special == "mall" and max_side is None and \
@@ -452,6 +453,10 @@ def levels_from_tags(tags: dict, settings: Settings) -> int | None:
     and rounded down, which is why a 10 m building comes out as three floors
     rather than four.
     """
+    return _tagged_levels(tags, settings)[0]
+
+
+def _tagged_levels(tags: dict, settings: Settings) -> tuple[int | None, str]:
     for key in ("building:levels", "levels"):
         value = _number(tags.get(key))
         if value is not None and value >= 1:
@@ -461,7 +466,7 @@ def levels_from_tags(tags: dict, settings: Settings) -> int | None:
             roof = _number(tags.get("roof:levels"))
             if roof and roof >= 1:
                 levels += int(roof)
-            return max(1, min(settings.max_levels, levels))
+            return max(1, min(settings.max_levels, levels)), "levels_tag"
 
     for key in ("height", "building:height", "est_height"):
         metres = _number(tags.get(key))
@@ -469,9 +474,9 @@ def levels_from_tags(tags: dict, settings: Settings) -> int | None:
             # A building:part sitting on a podium starts partway up.
             base = _number(tags.get("min_height")) or 0.0
             usable = max(metres - base, metres * 0.5)
-            return max(1, min(settings.max_levels,
-                              int(usable // METRES_PER_LEVEL)))
-    return None
+            return (max(1, min(settings.max_levels,
+                               int(usable // METRES_PER_LEVEL))), "height_tag")
+    return None, "estimate"
 
 
 def building_levels(tags: dict, kind: str | None, area_tiles: int,
@@ -873,6 +878,7 @@ def _make_one(job: tuple, room_limit: int | None = None) -> tuple:
         uses, hotel, entrances, profile, mapped, garage_door, preset_file,
         party, *rest) = job
     basement = rest[0] if rest else None
+    section = rest[1] if len(rest) > 1 else None
     job = job[:JOB_FIELDS]          # what the room solver reads, without the basement
     if preset_file:
         # A building somebody built by hand, used as it was built. Nothing is
@@ -897,7 +903,7 @@ def _make_one(job: tuple, room_limit: int | None = None) -> tuple:
         # it is on and the house fits; anything else is laid out as always
         from . import room_solver
         plan = None
-        if room_solver.wanted(settings):
+        if section is None and room_solver.wanted(settings):
             try:
                 plan = room_solver.plan_for_job(job)
             except Exception:  # noqa: BLE001 - that house keeps Build's own layout
@@ -907,7 +913,7 @@ def _make_one(job: tuple, room_limit: int | None = None) -> tuple:
                                   kind=kind, mask=mask, settings=settings, street=street,
                                   retail=retail, uses=uses, hotel=hotel, party=party,
                                   entrances=entrances, profile=profile,
-                                  mapped=mapped, garage_door=garage_door)
+                                  mapped=mapped, garage_door=garage_door, section=section)
         if room_limit:
             # Fewer, larger rooms: the map would otherwise be past the buffer
             # the game saves room state through, and none of it would be kept.
@@ -918,7 +924,8 @@ def _make_one(job: tuple, room_limit: int | None = None) -> tuple:
         if basement is not None:
             from . import basements
             # Before the house is written: the stairs down open its ground floor.
-            below = basements.plan_basement(plan, basement, seed, settings)
+            below = basements.plan_basement(plan, basement, seed, settings,
+                                            public_only=section is not None)
         # After thinning and the basement, so the rooms checked are the rooms
         # that will be in the file.
         problems = _layout_problems(plan, kind, below)
@@ -1316,6 +1323,8 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
     gunshops: set[str] = set()   # and the buildings OSM says sell weapons
     canopies: list[list] = []    # and the canopies over their forecourts
     decided: list[tuple] = []    # and what the map needs to know about it
+    section_plans: dict[int, tuple] = {}
+    basement_groups: dict[int, int] = {}
     surroundings: list[tuple[float, float, float, int | None]] = []
     centres: dict[int, tuple[float, float]] = {}   # each building's centroid
     for i, feat in enumerate(geo["features"]):
@@ -1599,7 +1608,9 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
                                            style_rng, here,
                                            metres_per_tile=metres_per_tile,
                                            region=region)
+        level_source = "estimate"
         if measured:
+            _, level_source = _tagged_levels(tags, here)
             from_osm += 1
         elif nearby is not None and (special or "house") in FOLLOWS_NEIGHBOURS:
             top = here.max_levels
@@ -1610,6 +1621,7 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
                           else HOUSE_MAX_LEVELS)
             levels = max(1, min(top, int(round(nearby)) +
                                 style_rng.choice((-1, 0, 0, 1))))
+            level_source = "neighbours"
             from_near += 1
         if flats_by_height(special, levels, btag, fp.tiles, here):
             special = "apartment"
@@ -1653,16 +1665,28 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
         # A row of shops or a terrace of houses is one polygon here; built as
         # one building it is the "uber building" players reported. Each unit
         # becomes its own building, standing wall to wall with the next.
-        units = row_units(fp, special, btag, len(uses), metres_per_tile,
-                          max_side=max_size if oversize else None,
-                          split=not settings.max_buildings)
-        if oversize:
-            split_large += 1
-        unit_mapped = _rooms_by_unit(mapped, fp, units, proj)
         placed_entrances = [(x, y, tags) for x, y, tags in entrance_points]
         if fp.point_rotation or fp.point_offset != (0.0, 0.0):
             placed_entrances = [(*fp.transform_point(x, y), tags)
                                 for x, y, tags in entrance_points]
+        sections, section_source = [], ""
+        if (settings.true_map and not settings.max_buildings and special == "apartment"
+                and btag in ("apartments", "residential")
+                and levels >= 3 and not (uses or mapped or hotel or oversize)
+                and not (preset_library and (zoning.any_presets() or special in preset_kinds))):
+            from .apartment_sections import plan_sections
+
+            sections, section_source = plan_sections(
+                fp, placed_entrances, street_side(x0, y0, w, h), metres_per_tile,
+                estimate=bool(here.estimate_stairwells))
+        units = ([s.footprint for s in sections] if sections else
+                 row_units(fp, special, btag, len(uses), metres_per_tile,
+                           max_side=max_size if oversize else None,
+                           split=not settings.max_buildings,
+                           true_map=bool(settings.true_map)))
+        if oversize:
+            split_large += 1
+        unit_mapped = _rooms_by_unit(mapped, fp, units, proj)
         entrances_by_unit = _entrances_by_unit(placed_entrances, units)
         if len(units) > 1:
             rows_split += 1
@@ -1707,11 +1731,14 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
                 if pick is not None:
                     preset_file = pick["file"]
                     used_presets[pick["name"]] += 1
+            if sections:
+                section_plans[len(jobs)] = sections[n].core, sections[n].door
+                basement_groups[len(jobs)] = i
             jobs.append((uw, uh, levels, commercial, seed + i * 31 + n, special, umask,
                          here, style, label, os.path.join(bdir, fname),
                          street_side(ux0, uy0, uw, uh),
                          # Shops under flats where the town is built up.
-                         context.density(cx, cy) >= RETAIL_DENSITY,
+                         not sections and context.density(cx, cy) >= RETAIL_DENSITY,
                          # What the ground floor really is, and a hotel's rooms.
                          unit_uses, hotel, entrances_by_unit[n], profile,
                          unit_mapped[n],
@@ -1721,9 +1748,13 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
                          preset_file))
             outline = px if len(units) == 1 else [
                 (ux0, uy0), (ux0 + uw, uy0), (ux0 + uw, uy0 + uh), (ux0, uy0 + uh)]
+            if sections:
+                outline = px if n == 0 else None
             decided.append((fname, label, ux0, uy0, uw, uh, unit, outline, special,
                             measured, commercial, style, umask,
-                            real_name if n == 0 else ""))
+                            real_name if n == 0 else "", btag, tags.get("osm_id"),
+                            "preset" if preset_file else level_source, section_source,
+                            n + 1 if sections else None))
 
     say("Fitting the buildings together", 0.04)
 
@@ -1752,11 +1783,13 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
     specs = [None] * len(jobs) if default_backend() != "rust" else basements.reserve(
         [{"kind": "preset" if job[19] else (d[8] or "house"),
           "x0": d[2], "y0": d[3], "w": d[4], "h": d[5],
-          "mask": d[6].mask}
-         for job, d in zip(jobs, decided)],
+          "mask": d[6].mask, "basement_group": basement_groups.get(j)}
+         for j, (job, d) in enumerate(zip(jobs, decided))],
         settings, region, areas, random.Random(f"{settings.seed}:basements"),
         (proj.width, proj.height), metres_per_tile * metres_per_tile)
     jobs = [job + (spec,) for job, spec in zip(jobs, specs)]
+    for j, section_plan in section_plans.items():
+        jobs[j] += (section_plan,)
 
     # Every decision above is made in order, from one random stream, so the
     # town comes out the same each time. What is left - laying out rooms and
@@ -1923,8 +1956,9 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
 
     basement_counts = {"house": 0, "large": 0, "installation": 0}
     for (fname, label, x0, y0, w, h, fp, px, special, measured, commercial,
-         style, mask, real_name), (storeys, rooms, furniture, error,
-                                   escalators, below, _problems) in zip(decided, results):
+         style, mask, real_name, btag, osm_id, level_source, section_source, section_number), (
+             storeys, rooms, furniture, error, escalators, below, _problems,
+         ) in zip(decided, results):
         if error:
             failed_buildings.append(error)
             continue
@@ -1945,7 +1979,8 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
         peopled.append((x0, y0, fp.mask, storeys,
                         hospitals.occupancy_kind(special or "house",
                                                  hifld_by_fname.get(fname))))
-        outlines.append((px, special or "house", real_name))
+        if px is not None:
+            outlines.append((px, special or "house", real_name))
         rows.append({
             "file": fname, "name": label,
             "tile_x": x0, "tile_y": y0, "width": w, "height": h,
@@ -1953,6 +1988,10 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
             "offset_x": p.offset_x, "offset_y": p.offset_y,
             "levels": storeys,
             "levels_from_osm": int(measured),
+            "level_source": level_source,
+            "osm_id": osm_id,
+            "entrance_section": section_number,
+            "entrance_source": section_source,
             "rooms": rooms,
             "furniture": furniture,
             "commercial": int(commercial),

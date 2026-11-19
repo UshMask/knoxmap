@@ -94,6 +94,7 @@
     "generator/vanilla_grid.py",
     "knoxbuild/__init__.py",
     "knoxbuild/__main__.py",
+    "knoxbuild/apartment_sections.py",
     "knoxbuild/areas.py",
     "knoxbuild/audit.py",
     "knoxbuild/basements.py",

@@ -106,6 +106,34 @@ class ThroughTheWindow(unittest.TestCase):
         body = self.client.get("/api/why/Town").get_json()
         self.assertEqual(body["total"], 3)
 
+    def test_the_clicked_building_shows_where_its_storeys_came_from(self):
+        folder = common.OUTPUT_DIR / "Town"
+        placements = folder / "Town_placements.csv"
+        placements.write_text(
+            "osm_id,levels,level_source\n18,6,neighbours\n18,6,neighbours\n"
+            "19,7,levels_tag\n", encoding="utf-8")
+
+        body = self.client.get("/api/why/Town?osm=18").get_json()
+        self.assertEqual(body["storeys"], [{"levels": 6, "source": "neighbours"}])
+
+    def test_older_placements_do_not_claim_a_source(self):
+        folder = common.OUTPUT_DIR / "Town"
+        (folder / "Town_placements.csv").write_text(
+            "file,levels,levels_from_osm\nTown_0001.tbx,6,0\n", encoding="utf-8")
+
+        body = self.client.get("/api/why/Town?osm=18").get_json()
+        self.assertEqual(body, {"state": "built", "osm_id": "18"})
+
+    def test_stairwell_count_and_source_follow_the_clicked_outline(self):
+        folder = common.OUTPUT_DIR / "Town"
+        (folder / "Town_placements.csv").write_text(
+            "osm_id,levels,level_source,entrance_section,entrance_source\n"
+            "18,6,neighbours,1,estimated\n18,6,neighbours,2,estimated\n"
+            "19,7,levels_tag,1,mapped\n", encoding="utf-8")
+
+        body = self.client.get("/api/why/Town?osm=18").get_json()
+        self.assertEqual(body["entrances"], [{"count": 2, "source": "estimated"}])
+
     def test_a_map_that_is_not_there(self):
         res = self.client.get("/api/why/nope?osm=3")
         self.assertEqual(res.status_code, 400)

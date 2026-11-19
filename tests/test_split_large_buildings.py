@@ -45,6 +45,17 @@ class Gate(unittest.TestCase):
 
 
 class Split(unittest.TestCase):
+    def test_true_map_keeps_a_long_apartment_block_whole(self):
+        outline = [(10, 10), (83, 10), (83, 24), (10, 24)]
+        fp, reason = place(outline, GRID.copy(), max_side=200)
+        self.assertIsNotNone(fp, reason)
+
+        self.assertEqual(row_units(fp, "apartment", "apartments", 0, 1.0,
+                                   true_map=True), [fp])
+        self.assertEqual(len(row_units(fp, "apartment", "apartments", 0, 1.0)), 8)
+        self.assertGreater(len(row_units(fp, "shop", "retail", 0, 1.0,
+                                        true_map=True)), 1)
+
     def test_cut_units_fit_inside_the_cap(self):
         fp, reason = placed(1e9)
         self.assertIsNotNone(fp, reason)

@@ -63,12 +63,7 @@ def api_features(name: str):
 
 @bp.route("/api/why/<name>")
 def api_why(name: str):
-    """Why one footprint did not become a building, for the clicked building.
-
-    The build already writes a row per footprint it left out; this is that
-    row, in words, so that the answer is a click rather than a csv and a
-    command line (tools/why_no_building.py does the same for a whole area).
-    """
+    """Show why a footprint was left out, or how its storeys were chosen."""
     map_dir = _map_dir(name)
     if map_dir is None:
         return jsonify({"error": "Bad map name."}), 400

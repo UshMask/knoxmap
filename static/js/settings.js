@@ -30,6 +30,7 @@ const SETTING_LABELS = {
   fill_gaps:           ['Fill gaps from Microsoft footprints', 'On adds the buildings OpenStreetMap has not got, from Microsoft’s machine-detected building footprints, same licence. Downloads about 30 MB per tile on the first run, nothing to install. Worth it where your town is half missing from OSM; elsewhere it adds sheds. Falls back to Overture (needs DuckDB) if Microsoft cannot be reached.'],
   fill_frontage:       ['Fill gaps in streets', 'Builds buildings missing from a street that has buildings beside the gap, matching their neighbours (width, depth, set-back, storeys) where there is room. Choose whether to also extend the ends of rows or only fill gaps between existing buildings.'],
   true_map:            ['True map generation', 'On builds every address as mapped. Off keeps the real roads, rivers, woods and terrain, but leaves out half the houses and grows the rest into proper homes with yards. Named places are always built, at the game’s size.'],
+  estimate_stairwells: ['Estimate stairwells', 'In true map mode, estimate stairwells for long apartment blocks without mapped entrances.'],
   guaranteed_rifle:    ['Guaranteed rifle', 'On leaves one military rifle on the map: in an army building if there is one, else the police station, else a gun shop, else a house on the edge of town. A real town has no checkpoints for one to spawn in.'],
   min_size:            ['Smallest building', 'Buildings narrower than this many tiles are left out.'],
   align_streets:       ['Straighten streets', 'On turns the map so the main street grid runs along the tiles - no staircase roads. Off keeps north up.'],
@@ -141,7 +142,7 @@ const SETTING_GROUPS = {
     advanced: [
       ['Which footprints', ['min_size', 'max_size', 'fill_frontage', 'building_alignment',
                             'building_mix', 'spread_buildings']],
-      ['Flats', ['apartment_footprint', 'apartment_chance']],
+      ['Flats', ['apartment_footprint', 'apartment_chance', 'estimate_stairwells']],
       ['Look', ['neighbourhood_tiles', 'style_oddity']],
       ['Rooms', ['room_solver', 'room_size']],
       ['Basements', ['basement_share', 'max_basement_depth']],

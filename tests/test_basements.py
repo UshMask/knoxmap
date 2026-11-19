@@ -79,6 +79,19 @@ class Tiers(unittest.TestCase):
 
 
 class Reserving(unittest.TestCase):
+    def test_sections_do_not_shift_the_basement_roll_for_later_houses(self):
+        houses = [row("house", 5 + i * 9, 30, 7, 7) for i in range(6)]
+        block = row("apartment", 5, 5, 40, 12)
+        sections = [dict(row("apartment", 5 + i * 10, 5, 10, 12), basement_group=0)
+                    for i in range(4)]
+        def choices(rows):
+            return [spec is not None for spec in reserve(
+                rows, Settings(), None, None, random.Random(1), (100, 100))]
+        original = choices([block] + houses)
+        sectional = choices(sections + houses)
+        self.assertEqual(sectional[:4], original[:1] * 4)
+        self.assertEqual(sectional[4:], original[1:])
+
     def test_underground_squares_are_taken_once(self):
         u = Underground()
         m = np.ones((4, 4), dtype=bool)
