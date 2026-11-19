@@ -133,6 +133,15 @@ def check_compile_failures(check, work: str) -> None:
             _json.dumps({"pid": 999999, "run": "crashed"}), encoding="utf-8")
         cells = compiler.compile_map(str(project), batch=2, exe=str(exe))
         check(cells == 16, "and a lock left behind by a crash is cleared, not fatal")
+
+        project, exe, tries = harness({})
+        source = project / "tmx" / "edited.tmx"
+        source.write_text("manual edit", encoding="utf-8")
+        (project / compiler.INCOMPLETE_LOTS).write_text("publishing", encoding="utf-8")
+        cells = compiler.compile_map(str(project), batch=2, exe=str(exe))
+        check(cells == 16 and source.read_text(encoding="utf-8") == "manual edit"
+              and not (project / compiler.INCOMPLETE_LOTS).exists(),
+              "and recovering from an interrupted publish preserves source maps")
     finally:
         for name, value in keep.items():
             setattr(compiler, name, value)

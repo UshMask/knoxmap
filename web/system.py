@@ -634,20 +634,17 @@ def api_forest_preview():
 @bp.route("/api/install", methods=["POST"])
 def api_install():
     """Package the compiled map into ~/Zomboid/mods."""
-    from knoxbuild import placement as P
     from tools import make_map_mod
+    from tools.compile_map import ProjectBusy
+    from web.jobs import _hold, _set_progress
 
     data = _json_body()
     map_dir = _map_dir(data.get("mapName", ""))
     if map_dir is None:
         return jsonify({"error": "Unknown map."}), 404
-    # A map moved since it was compiled would ship cells named for where it
-    # used to be and a paper map pointing where it is now, which is a map the
-    # game loads as two halves of different places.
-    where = P.saved(str(map_dir)) or P.project_origin(str(map_dir), map_dir.name)
-    if not P.lots_match(str(map_dir), where):
-        return jsonify({"error": "This map has been moved since it was last "
-                                 "compiled. Compile it again, then install."}), 400
+    busy = _hold(map_dir, "installed")
+    if busy is not None:
+        return busy
     # Both end up in folder names and mod.info, so they are text of a sane
     # length whatever the page sent.
     raw_title, raw_id = data.get("title"), data.get("modId")
@@ -673,15 +670,17 @@ def api_install():
     # The copy is the long part - a city is gigabytes - so the window can
     # follow it on /api/progress like the other steps, instead of a greyed-out
     # button and nothing else until it was over.
-    from web.jobs import _set_progress
     t0 = time.time()
     _set_progress(map_dir.name, stage="install", done=0, total=0)
     try:
         mod_root, n_cells, extras = make_map_mod.package(
-            str(map_dir), title, mod_id,
+            str(map_dir), title, mod_id, mods_dir=mods_dir, project_locked=True,
             on_progress=lambda done, total: _set_progress(
                 map_dir.name, stage="install", done=done, total=total))
-    except FileNotFoundError as exc:
+    except ProjectBusy as exc:
+        _set_progress(map_dir.name, stage="install-failed")
+        return failed(str(exc), 409, exc)
+    except (FileNotFoundError, make_map_mod.InvalidLots) as exc:
         _set_progress(map_dir.name, stage="install-failed")
         return failed(str(exc), 400, exc)
     except Exception as exc:
@@ -712,10 +711,14 @@ def api_uninstall():
     KnoxMap installed this map into is removed; the map's own files and the
     player's saves are left alone."""
     from tools import make_map_mod
+    from web.jobs import _hold
 
     map_dir = _map_dir(_json_body().get("mapName", ""))
     if map_dir is None:
         return jsonify({"error": "Unknown map."}), 404
+    busy = _hold(map_dir, "uninstalled")
+    if busy is not None:
+        return busy
     rec = mapstate.installed(str(map_dir))
     if rec is None:
         return jsonify({"error": "This map is not installed."}), 404
