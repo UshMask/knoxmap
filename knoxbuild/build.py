@@ -2112,7 +2112,10 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
                         pop, indent=2, ensure_ascii=False)
         return pop
 
+    from .parking_osm import ParkingOSM
+
     vehicle_report = {}
+    parking_osm = ParkingOSM.load(out_dir, map_name, info, proj)
     with ThreadPoolExecutor(max_workers=5) as pool:
         job_fences = pool.submit(build_fences, out_dir, map_name, proj, occupied,
                                  areas, bdir, extra=yard_fences, keep_clear=fence_clear)
@@ -2127,6 +2130,8 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
             settings=settings, areas=areas, drives=drives, keep_clear=forecourts,
             road_hierarchy=road_hierarchy,
             streets_path=os.path.join(out_dir, "streets.xml"), vehicle_report=vehicle_report,
+            parking_osm=parking_osm,
+            street_origin=tuple(cell * CELL_SIZE for cell in origin()),
             veg_path=os.path.join(out_dir, f"{map_name}_veg.bmp"))
         fence_placements, fence_tiles = job_fences.result()
         population = job_spawn.result()

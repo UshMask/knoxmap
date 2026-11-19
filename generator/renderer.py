@@ -32,7 +32,7 @@ from . import pz_colors as C
 from . import structures
 from .osm import (FENCE_BARRIERS, GATE_BARRIERS, OSMFeature,  # noqa: F401
                   ROAD_HIERARCHY_BY_CODE, ROAD_HIERARCHY_CODES, classify,
-                  road_hierarchy)
+                  project_cache_reference, road_hierarchy)
 
 # Everything that moved out is still importable from here: the tests, the
 # tools and knoxbuild reach into this module by name.
@@ -70,7 +70,8 @@ from .rendering.outputs import (AREA_TAGS, LINE_TAGS, OPENING_PATHS,
                                 _openings_geojson, _places)  # noqa: F401
 from .rendering.projection import (Projector, _ceil_to, _inside, cover_bbox,
                                    shape_px)  # noqa: F401
-from .rendering.roads import (_paint_road_details, _pave_dense_ground,
+from .rendering.roads import (_paint_road_details, _paint_roadside, _pave_dense_ground,
+                              _pedestrian_passages,
                               _real_kerbs, _road_hierarchy_image,
                               _smooth_road_edges, _weather_roads,
                               paint_rails)  # noqa: F401
@@ -330,6 +331,8 @@ def _collect_global_features(features: list[OSMFeature], proj, clip,
         if barrier in FENCE_BARRIERS and feat.kind == "way":
             fence_feats.append(feat)
         cat = classify(feat.tags, _is_polygon(feat))
+        if cat is None and feat.kind == "way" and feat.tags.get("footway") == "crossing":
+            _log.info("OSM crossing %s skipped by ground feature filter", feat.osm_id)
         if cat is None or cat in {"fence", "hedge"}:
             continue
         if cat == "building":
@@ -570,32 +573,7 @@ def render(features: Iterable[OSMFeature], south: float, west: float,
             # use: painted first, a park or a lawn mapped up to the kerb erased
             # the pavement and the tarmac met the grass. One pass so a side
             # street's pavement cannot cut across the high street it joins.
-            for fill, is_sidewalk in ((C.PALE_CONCRETE, True),
-                                      (C.DARK_GRASS, False)):
-                strokes = []
-                for road in ("road_service", "road_minor", "road_medium", "road_major"):
-                    for feat in buckets.get(road, []):
-                        if _is_polygon(feat):
-                            continue
-                        w_road = _pixel_width(_way_width_m(feat, road), meters_per_tile)
-                        v_m = _verge_width_m(feat, road)
-                        verge_side = max(1, int(v_m / meters_per_tile + 0.49)) if v_m > 0 else 0
-                        if not is_sidewalk:
-                            if verge_side <= 0:
-                                continue
-                            w_stroke = w_road + 2 * verge_side
-                        else:
-                            s_m = _sidewalk_width_m(feat, road)
-                            if s_m <= v_m:
-                                continue
-                            pave_side = max(1, round((s_m - v_m) / meters_per_tile))
-                            r_v = (w_road + 2 * verge_side - 1) / 2.0
-                            r_s = r_v + pave_side
-                            if int(r_s * 1.41421356) - int((r_v * 1.41421356) + 0.999999) + 1 < 4:
-                                pave_side += 1
-                            w_stroke = w_road + 2 * (verge_side + pave_side)
-                        strokes.append((w_stroke, ground_rings(feat)))
-                _draw_roads(landscape, strokes, fill, crisp=(road_layout == 5))
+            _paint_roadside(landscape, buckets, proj, ground_rings, crisp=(road_layout == 5))
         fill = LANDSCAPE_FILL.get(cat)
         if fill is None:
             continue
@@ -756,18 +734,25 @@ def render(features: Iterable[OSMFeature], south: float, west: float,
     _clear_road_vegetation(vegetation, landscape)
     _paint_road_details(vegetation, landscape, buckets, proj,
                         smooth_edges=(road_layout != 5))
+    passages = _pedestrian_passages(vegetation, buckets, proj)
     hierarchy_image = _road_hierarchy_image(buckets, proj)
     road_furniture = _road_furniture_mask(buckets, proj, ground_rings,
                                           crisp=(road_layout == 5))
+    street_bins: list[dict] = []
     _paint_street_furniture(vegetation, landscape, hierarchy_image, building_mask,
                             road_furniture=road_furniture, features=features,
-                            proj=proj, clip=clip, settings=street_settings)
+                            proj=proj, clip=clip, settings=street_settings,
+                            bin_report=street_bins, passage_mask=passages)
     t_details = time.perf_counter()
     # Nothing grows through a deck or a ramp, and no lamp stands on one.
     veg_px = vegetation.load()
     for x, y in lifted.clear_veg:
         if 0 <= x < proj.width and 0 <= y < proj.height:
             veg_px[x, y] = C.VEG_NOTHING
+    for entry in street_bins:
+        if "tile" in entry and veg_px[tuple(entry["tile"])] != C.BIN:
+            entry.pop("tile")
+            entry.update(status="skipped", reason="structure_clearance")
     structures.rail_water(lifted, landscape, C.WATER)
     ground_px = landscape.load()
     under = {C.WATER, C.MEDIUM_ASPHALT, C.DARK_ASPHALT, C.DARKEST_ASPHALT,
@@ -793,6 +778,7 @@ def render(features: Iterable[OSMFeature], south: float, west: float,
         _chunk_out["vegetation"] = vegetation
         _chunk_out["hierarchy"] = hierarchy_image
         _chunk_out["spawn_map"] = spawn_map
+        _chunk_out["street_bins"] = street_bins
         _chunk_out["structures"] = {
             "bridges": lifted.bridges,
             "monuments": lifted.monuments,
@@ -869,6 +855,8 @@ def render(features: Iterable[OSMFeature], south: float, west: float,
     knoxfiles.write(os.path.join(output_dir, f"{map_name}_structures.json"),
                     {"bridges": lifted.bridges, "monuments": lifted.monuments,
                      "tiles": lifted.rows()})
+    knoxfiles.write(os.path.join(output_dir, f"{map_name}_street_furniture.json"),
+                    {"stage": "generate", "bins": street_bins})
     cells_x, cells_y = proj.cell_grid()
     if _write_geojson:
         knoxfiles.write(buildings_path, _buildings_geojson(building_feats, indoor_feats))
@@ -888,7 +876,7 @@ def render(features: Iterable[OSMFeature], south: float, west: float,
             "map_name": map_name,
             "bbox": {"south": south, "west": west, "north": north, "east": east},
             "rotation": rotation,
-            "osm_cache": osm_cache,
+            "osm_cache": project_cache_reference(output_dir, osm_cache),
             "straight_roads": road_layout,
             "include_proposed_roads": include_proposed_roads,
             "osm_bbox": list(osm_bbox) if osm_bbox else None,

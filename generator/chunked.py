@@ -26,7 +26,7 @@ import knoxstop
 from knoxbuild.settings import DEFAULT_STREET_SETTINGS, STREET_RENDER_KEYS, StreetSettings
 
 from . import pz_colors as C
-from .osm import OSMFeature, classify
+from .osm import OSMFeature, classify, project_cache_reference
 from .rendering.geometry import _feature_coords_px, _is_polygon
 from .rendering.noise import global_tile_offset
 from .rendering.projection import Projector, _inside, shape_px
@@ -248,6 +248,7 @@ def render_chunked(
     merged_bridges = 0
     merged_monuments = 0
     merged_tiles: list = []
+    street_bins: list[dict] = []
     seen_struct_tiles: set[tuple[int, int, int, str]] = set()
     pad = max(96, halo_tiles)
 
@@ -259,6 +260,7 @@ def render_chunked(
         "meters_per_tile": float(meters_per_tile), "rotation": float(rotation),
         "road_layout": road_layout, "terrain_only": int(terrain_only or 0),
         "street_furniture": {key: getattr(street_settings, key) for key in STREET_RENDER_KEYS},
+        "street_rules": 2,
         "spawn_density": int(spawn_density),
         "tree_density": float(tree_density),
         "forest_density": float(forest_density),
@@ -274,6 +276,7 @@ def render_chunked(
                 merged_bridges = int(ckpt.get("bridges", 0))
                 merged_monuments = int(ckpt.get("monuments", 0))
                 merged_tiles = list(ckpt.get("tiles", []))
+                street_bins = list(ckpt.get("street_bins", []))
                 seen_struct_tiles = {
                     (int(r[0]), int(r[1]), int(r[2]), r[3])
                     for r in merged_tiles
@@ -286,10 +289,11 @@ def render_chunked(
                           map_name, len(done_chunks), total_chunks)
         except Exception:
             done_chunks.clear()
+            street_bins.clear()
             can_resume = False
 
     def _stitch_chunk(idx, cx0, cy0, x0, y0, x1, y1, hx0, hy0,
-                      land_arr, veg_arr, hier_arr, sp_arr, st):
+                      land_arr, veg_arr, hier_arr, sp_arr, st, bins):
         nonlocal merged_bridges, merged_monuments
         w_land.write_block(x0, y0, land_arr)
         w_veg.write_block(x0, y0, veg_arr)
@@ -321,6 +325,16 @@ def render_chunked(
                         seen_struct_tiles.add(tkey)
                         merged_tiles.append([gx, gy, int(rz), rlayer, rtile])
 
+        for entry in bins:
+            ax, ay = entry["anchor"]
+            px, py = entry.get("tile", entry["anchor"])
+            gx, gy = px + hx0, py + hy0
+            if x0 <= gx < x1 and y0 <= gy < y1:
+                entry["anchor"] = [ax + hx0, ay + hy0]
+                if "tile" in entry:
+                    entry["tile"] = [gx, gy]
+                street_bins.append(entry)
+
         w_land.flush()
         w_veg.flush()
         w_hier.flush()
@@ -333,6 +347,7 @@ def render_chunked(
             "bridges": merged_bridges,
             "monuments": merged_monuments,
             "tiles": merged_tiles,
+            "street_bins": street_bins,
         })
         _log.info("chunked %s: stitched chunk %d/%d (%d..%d, %d..%d)",
                   map_name, idx, total_chunks, x0, x1, y0, y1)
@@ -423,13 +438,14 @@ def render_chunked(
                     )
                 )
                 st = chunk_out.get("structures")
+                bins = chunk_out["street_bins"]
                 chunk_out.clear()
 
                 if pending_stitch is not None:
                     pending_stitch.result()
                 pending_stitch = stitch_pool.submit(
                     _stitch_chunk, idx, cx0, cy0, x0, y0, x1, y1, hx0, hy0,
-                    land_arr, veg_arr, hier_arr, sp_arr, st,
+                    land_arr, veg_arr, hier_arr, sp_arr, st, bins,
                 )
 
         if pending_stitch is not None:
@@ -470,6 +486,14 @@ def render_chunked(
     knoxfiles.write(os.path.join(output_dir, f"{map_name}_structures.json"),
                     {"bridges": merged_bridges, "monuments": merged_monuments,
                      "tiles": merged_tiles})
+    # A bin may be in the neighbouring core while its source point is in this
+    # one. Keep the actual painted position in preference to a halo refusal.
+    placed_bins = {(entry["source"], entry["osm_id"]) for entry in street_bins if "tile" in entry}
+    street_bins = [entry for entry in street_bins if "tile" in entry
+                   or (entry["source"], entry["osm_id"]) not in placed_bins]
+    street_bins.sort(key=lambda entry: (entry["source"], entry["osm_id"], entry["anchor"]))
+    knoxfiles.write(os.path.join(output_dir, f"{map_name}_street_furniture.json"),
+                    {"stage": "generate", "bins": street_bins})
     knoxfiles.write(os.path.join(output_dir, f"{map_name}_places.json"),
                     R._places(place_feats, full_proj), ensure_ascii=False)
 
@@ -478,7 +502,7 @@ def render_chunked(
         "map_name": map_name,
         "bbox": {"south": south, "west": west, "north": north, "east": east},
         "rotation": rotation,
-        "osm_cache": osm_cache,
+        "osm_cache": project_cache_reference(output_dir, osm_cache),
         "straight_roads": road_layout,
         "include_proposed_roads": include_proposed_roads,
         "osm_bbox": list(osm_bbox) if osm_bbox else None,

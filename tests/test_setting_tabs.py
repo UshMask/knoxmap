@@ -8,7 +8,7 @@ from knoxbuild.settings import Settings
 ROOT = Path(__file__).resolve().parent.parent
 APP = "\n".join(p.read_text(encoding="utf-8")
                 for p in sorted((ROOT / "static" / "js").glob("*.js")))
-TABS = ["map", "gameplay", "roads", "buildings", "land", "forest"]
+TABS = ["map", "gameplay", "roads", "street", "buildings", "land", "forest"]
 UI_LINES = ["Map", "Area", "Gameplay", "Roads", "Buildings", "Land", "Forest", "Other", "Settings",
             "Advanced", "Reset", "Changed from the defaults for this kind of place"]
 LANGS = ("english", "espanol", "portugues_brasil", "russian")
@@ -41,6 +41,8 @@ def translations(lang):
 class SettingTabs(unittest.TestCase):
     def test_the_tabs_in_order(self):
         self.assertEqual(list(tabs()), TABS)
+        self.assertRegex(block("SETTING_GROUPS"),
+                         r"\['Vehicles', \[[^\]]*'vehicle_parking_occupancy'[^\]]*\]\]")
 
     def test_every_labelled_setting_is_in_exactly_one_tab(self):
         labelled = re.findall(r"\n  (\w+):\s*\[", block("SETTING_LABELS"))

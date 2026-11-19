@@ -1,12 +1,42 @@
 import unittest
 import random
+from types import SimpleNamespace
 
+from generator.osm import OSMFeature
+from generator.rendering.buildings import _buildings_geojson, _houses_from_addresses
 from knoxbuild import build, layout
 from knoxbuild.profile import BuildingProfile
 from knoxbuild.settings import Settings
 
 
 class BuildingProfileTests(unittest.TestCase):
+    def test_exported_way_and_relation_dates_reach_the_profile(self):
+        ring = [(1, 2), (1, 3), (2, 3), (1, 2)]
+        way = OSMFeature(1, "way", {"building": "house", "start_date": "1922-06"}, ring)
+        relation = OSMFeature(2, "relation", {"building": "house", "start_date": "1976"},
+                              [], role_geoms=[("outer", ring)])
+        undated = OSMFeature(3, "way", {"building": "house"}, ring)
+        modern = OSMFeature(4, "way", {"building": "house", "start_date": "2014"}, ring)
+        tags = [feat["properties"] for feat in
+                _buildings_geojson([way, relation, undated, modern])["features"]]
+        self.assertEqual([tag.get("start_date") for tag in tags], ["1922-06", "1976", None, "2014"])
+        profiles = [BuildingProfile.infer(tag, "house", 0.1, 100, 2, 4) for tag in tags]
+        self.assertEqual([p.year_built for p in profiles[:2]], [1922, 1976])
+        self.assertTrue(all(p.dated for p in profiles[:2]))
+        self.assertFalse(profiles[2].dated)
+        self.assertEqual(profiles[2], profiles[3])
+
+    def test_inferred_footprint_does_not_inherit_a_business_start_date(self):
+        point = OSMFeature(71, "node", {"addr:housenumber": "5", "shop": "bakery",
+                                        "start_date": "1992"}, [(20, 20)])
+        proj = SimpleNamespace(width=60, height=60, meters_per_tile=1,
+                               to_px=lambda lat, lon: (lon, lat),
+                               to_latlon=lambda x, y: (y, x))
+        footprint = _houses_from_addresses([point], [], proj)
+        properties = _buildings_geojson(footprint)["features"][0]["properties"]
+        self.assertEqual(properties["shop"], "bakery")
+        self.assertNotIn("start_date", properties)
+
     def test_inference_is_reproducible_and_uses_explicit_tags(self):
         tags = {"start_date": "1922", "building:condition": "poor",
                 "class": "luxury", "building": "mansion"}

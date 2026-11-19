@@ -10,6 +10,7 @@ import gzip
 import hashlib
 import json
 import math
+import ntpath
 import os
 import re
 import threading
@@ -457,6 +458,8 @@ OVERPASS_FILTERS: Sequence[str] = (
     # building's own tags (knoxbuild/uses.py).
     'node["shop"]',
     'node["highway"~"^(street_lamp|bus_stop)$"]',
+    'node["highway"="crossing"]',
+    'node["amenity"="parking_entrance"]',
     'node["public_transport"="platform"]["bus"="yes"]',
     'node["amenity"~"^(post_box|waste_basket)$"]',
     'node["amenity"~"^(restaurant|fast_food|food_court|cafe|ice_cream|bar|pub|nightclub|'
@@ -1082,6 +1085,41 @@ def _fetch_splitting(south: float, west: float, north: float, east: float,
 
 def cache_path(output_dir: str, map_name: str) -> str:
     return os.path.join(output_dir, f"{map_name}_osm.json.gz")
+
+
+def project_cache_reference(output_dir: str, path: str | None) -> str | None:
+    """Store the name of a cache beside the map so the folder can be moved."""
+    if path and os.path.isabs(path):
+        parent = os.path.dirname(os.path.normpath(path))
+        if os.path.normcase(parent) == os.path.normcase(os.path.abspath(output_dir)):
+            return os.path.basename(path)
+    return path
+
+
+def load_project_cache(output_dir: str, map_name: str, info: dict
+                       ) -> tuple[str, list[OSMFeature]]:
+    """Read the generation snapshot for Build and the paper map, entirely offline."""
+    reference = info.get("osm_cache")
+    if not reference:
+        candidates = [cache_path(output_dir, map_name)]
+    elif os.path.isabs(reference) or ntpath.isabs(reference):
+        # Older projects could point back to the machine that generated them.
+        # Prefer the snapshot that actually travelled with a copy of the map.
+        local = os.path.join(output_dir, ntpath.basename(reference))
+        candidates = [local, reference]
+    else:
+        candidates = [os.path.join(output_dir, reference)]
+    bbox = info.get("bbox") or {}
+    wanted = tuple(info.get("osm_bbox") or
+                   [bbox.get(key) for key in ("south", "west", "north", "east")])
+    for path in dict.fromkeys(candidates):
+        features = load_cache(path, wanted, filters=None)
+        if features is not None:
+            return path, proposed_roads(features, info.get("include_proposed_roads", 0))
+    if reference:
+        knoxlog.log.warning("%s: no readable OSM snapshot with bounds %s at %s",
+                            map_name, wanted, " or ".join(candidates))
+    return candidates[0], []
 
 
 def save_cache(path: str, bbox: tuple[float, float, float, float],

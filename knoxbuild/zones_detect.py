@@ -1,10 +1,12 @@
 """Zone detection (ParkingStall and TownZone) for Project KnoxMap."""
 from __future__ import annotations
 
+from collections import Counter
 from typing import TYPE_CHECKING
 
 import numpy as np
 
+from .parking_osm import compare_lot_capacity, lot_policy
 from .road_vehicles import STALL_H, STALL_W, roadside_bays, street_lookup, traffic_jams, zone_chunks
 from .settings import Settings
 
@@ -14,7 +16,7 @@ if TYPE_CHECKING:
 CAR_PARK_LANE = 17            # two rows of 5, and a 7-tile lane
 
 
-def car_park_stalls(bounds: tuple[int, int, int, int], w: int, h: int):
+def car_park_stalls(bounds: tuple[int, int, int, int], w: int, h: int, *, parallel=False):
     """Where a stall could go in a car park with these bounds, as (x, y, sw, sh),
     in the order they are tried - only the ones that lie on the map.
 
@@ -25,20 +27,21 @@ def car_park_stalls(bounds: tuple[int, int, int, int], w: int, h: int):
     can be on the map visits the same stalls in the same order."""
     x0, y0, x1, y1 = bounds
     across = (x1 - x0) >= (y1 - y0)          # rows run along the long side
-    sw, sh = (STALL_W, STALL_H) if across else (STALL_H, STALL_W)
+    length, depth = (STALL_H, STALL_W) if parallel else (STALL_W, STALL_H)
+    sw, sh = (length, depth) if across else (depth, length)
     # b runs along the rows, a across them; a + row is the offset of a stall's row.
     b_origin, b_len, b_map = (x0, x1 - x0, w) if across else (y0, y1 - y0, h)
     a_origin, a_len, a_map = (y0, y1 - y0, h) if across else (x0, x1 - x0, w)
-    lane = CAR_PARK_LANE
-    a_lo = max(0, -a_origin - STALL_H)
+    lane = 2 * depth + CAR_PARK_LANE - 2 * STALL_H
+    a_lo = max(0, -a_origin - depth)
     a_start = -(-a_lo // lane) * lane
-    a_stop = min(a_len, a_map - STALL_H - a_origin + 1)
+    a_stop = min(a_len, a_map - depth - a_origin + 1)
     b_lo = max(0, -b_origin)
-    b_start = -(-b_lo // STALL_W) * STALL_W
-    b_stop = min(b_len, b_map - STALL_W - b_origin + 1)
+    b_start = -(-b_lo // length) * length
+    b_stop = min(b_len, b_map - length - b_origin + 1)
     for a in range(a_start, a_stop, lane):
-        for row in (0, STALL_H):
-            for b in range(b_start, b_stop, STALL_W):
+        for row in (0, depth):
+            for b in range(b_start, b_stop, length):
                 x, y = (x0 + b, y0 + a + row) if across else (x0 + a + row, y0 + b)
                 if 0 <= x and x + sw <= w and 0 <= y and y + sh <= h:
                     yield x, y, sw, sh
@@ -48,7 +51,8 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
                   settings: Settings | None = None, areas=None, drives=(),
                   keep_clear=(), road_hierarchy: np.ndarray | None = None,
                   veg_path: str | None = None, streets_path: str | None = None,
-                  vehicle_report: dict | None = None):
+                  street_origin: tuple[int, int] = (0, 0),
+                  vehicle_report: dict | None = None, parking_osm=None):
     """Parking stalls along the roads, town zones over built-up ground.
 
     ParkingStall zones support parked cars and pileups, while narrow Nav
@@ -76,7 +80,11 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
     counts = {key: 0 for key in ("mapped_parking", "yards", "unmapped_parking", "roadside",
                                 "traffic_jams", "road_stories")}
     report.update(counts=counts, roadside_candidates=0, roadside_reserved_for_stories=0,
-                  jam_candidates=0, roadside=[], jams=[])
+                  jam_candidates=0, roadside=[], jams=[], parking=[], lots=[],
+                  roadside_skipped=Counter(), clearance_rejections=Counter())
+    if parking_osm is not None and vehicle_report is not None:
+        report.update(protected_access=parking_osm.report(),
+                      excluded_osm_lots=dict(parking_osm.excluded_osm_lots))
     lot_density = settings.parking_density
     yard_density = getattr(settings, "vehicle_yard_density", None)
     kerb_density = getattr(settings, "vehicle_kerb_density", None)
@@ -85,8 +93,11 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
     kerb_density = lot_density if kerb_density is None else kerb_density
     jam_density = lot_density if jam_density is None else jam_density
     drives = tuple(drives)
-    lots = [shape for shape, props in areas._items if props.get("category") == "parking"] if areas else []
-    reserved = STRtree([*lots, *(box(x, y, x + sw, y + sh) for x, y, sw, sh in drives)])
+    lots = [(shape, props) for shape, props in areas._items
+            if props.get("category") == "parking"] if areas else []
+    drive_shapes = [box(x, y, x + sw, y + sh) for x, y, sw, sh in drives]
+    mapped_drives = STRtree(drive_shapes)
+    reserved = STRtree([*(shape for shape, _ in lots), *drive_shapes])
     clear_boxes = [(x, y, x + sw, y + sh) for x, y, sw, sh in keep_clear]
     buildings = [box(p.tile_x, p.tile_y, p.tile_x + p.width, p.tile_y + p.height)
                  for p in placements]
@@ -96,9 +107,32 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
         return len(reserved) > 0 and reserved.query(
             box(x, y, x + sw, y + sh), predicate="intersects").size > 0
 
+    def clear_of_access(x, y, sw, sh, lot_rejections=None):
+        reason = "forecourt" if _in_boxes(x, y, sw, sh, clear_boxes) else (
+            parking_osm.restriction(x, y, sw, sh) if parking_osm is not None else None)
+        if reason:
+            report["clearance_rejections"][reason] += 1
+            if lot_rejections is not None:
+                lot_rejections[reason] += 1
+        return not reason
+
     def unavailable(x, y, sw, sh):
-        return (_in_boxes(x, y, sw, sh, clear_boxes) or is_reserved(x, y, sw, sh)
+        return (not clear_of_access(x, y, sw, sh) or is_reserved(x, y, sw, sh)
                 or built.query(box(x, y, x + sw, y + sh), predicate="intersects").size > 0)
+
+    candidates = {"car_parks": [], "roadside": []}
+
+    def park(kind, x, y, sw, sh, *, lot=None, street=None):
+        taken.update(zone_chunks((x, y, sw, sh)))
+        index = len(zones)
+        zones.append(Zone("ParkingStall", x, y, sw, sh))
+        if kind == "yards":
+            counts[kind] += 1
+            if vehicle_report is not None:
+                report["parking"].append({"kind": kind, "x": x, "y": y, "width": sw, "height": sh})
+            return
+        group = "roadside" if kind == "roadside" else "car_parks"
+        candidates[group].append((index, (x, y, sw, sh), kind, lot, street))
 
     with Image.open(landscape_path) as source:
         land_arr = np.asarray(source.convert("RGB"))
@@ -124,10 +158,8 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
 
     # A car on most drives, as in Knox County.
     for x, y, sw, sh in drives:
-        if rng.random() < min(1.0, 0.6 * yard_density):
-            taken.update(zone_chunks((x, y, sw, sh)))
-            zones.append(Zone("ParkingStall", x, y, sw, sh))
-            counts["yards"] += 1
+        if rng.random() < min(1.0, 0.6 * yard_density) and clear_of_access(x, y, sw, sh):
+            park("yards", x, y, sw, sh)
 
     # Car parks OpenStreetMap maps as such: rows of stalls across the whole of
     # each, two rows back to back and then a lane, the way a real one is laid
@@ -136,32 +168,70 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
     painted_stalls: list[tuple[int, int, int, int, bool, bool]] = []
     island_boxes: list[tuple[int, int, int, int, bool]] = []
     extra_lamps: list[tuple[int, int, tuple[int, int, int]]] = []
+    capacity_sites = {}
     if lots:
         from shapely.prepared import prep
-        for lot in lots:
+        extent = parking_osm.extent if parking_osm is not None else box(0, 0, w, h)
+        used_lot_tiles = np.zeros((h, w), dtype=bool)
+        for lot, props in lots:
+            orientation, reason = lot_policy(props)
+            rejected = Counter()
+            entry = {"osm_id": props.get("osm_id"), "type": props.get("parking"),
+                     "bounds": list(lot.bounds), "orientation": orientation, "reason": reason,
+                     "orientation_source": ("OSM" if props.get("orientation") or
+                                            props.get("parking:orientation") else "default"),
+                     "within_map": extent.covers(lot), "layout_rejections": rejected,
+                     "capacity": 0, "eligible": 0, "target": 0, "exported": 0}
+            report["lots"].append(entry)
+            capacity_sites.setdefault(id(props), (props, []))[1].append(entry)
+            if reason:
+                continue
             lot_prep = prep(lot)
             bounds = tuple(int(v) for v in lot.bounds)
             across = (bounds[2] - bounds[0]) >= (bounds[3] - bounds[1])
             a_origin = bounds[1] if across else bounds[0]
             b_origin = bounds[0] if across else bounds[1]
+            a_end = bounds[3] if across else bounds[2]
+            b_end = bounds[2] if across else bounds[3]
+            parallel = orientation == "parallel"
+            length, depth = (STALL_H, STALL_W) if parallel else (STALL_W, STALL_H)
+            lane = 2 * depth + CAR_PARK_LANE - 2 * STALL_H
             lot_stalls: list[tuple[int, int, int, int, bool, int, int]] = []
-            for x, y, sw, sh in car_park_stalls(bounds, w, h):
+            for x, y, sw, sh in car_park_stalls(bounds, w, h, parallel=parallel):
                 stall = box(x, y, x + sw, y + sh)
                 if not lot_prep.contains(stall):
+                    rejected["outside_polygon"] += 1
                     continue
-                if not (hard_mask[y, x] and hard_mask[y, x + sw - 1]
-                        and hard_mask[y + sh - 1, x] and hard_mask[y + sh - 1, x + sw - 1]):
+                if not hard_mask[y:y + sh, x:x + sw].all():
+                    rejected["unsuitable_surface"] += 1
+                    continue
+                if used_lot_tiles[y:y + sh, x:x + sw].any():
+                    rejected["overlapping_lot"] += 1
                     continue
                 if built.query(stall, predicate="intersects").size:
+                    rejected["building"] += 1
+                    continue
+                if mapped_drives.query(stall, predicate="intersects").size:
+                    rejected["driveway"] += 1
+                    continue
+                if not clear_of_access(x, y, sw, sh, rejected):
                     continue
                 a_coord = y if across else x
                 b_coord = x if across else y
-                is_first_row = ((a_coord - a_origin) % CAR_PARK_LANE) == 0
-                band = (a_coord - a_origin) // CAR_PARK_LANE
-                slot = (b_coord - b_origin) // STALL_W
+                is_first_row = ((a_coord - a_origin) % lane) == 0
+                band = (a_coord - a_origin) // lane
+                slot = (b_coord - b_origin) // length
+                used_lot_tiles[y:y + sh, x:x + sw] = True
                 lot_stalls.append((x, y, sw, sh, is_first_row, band, slot))
 
             if not lot_stalls:
+                entry["reason"] = "no_space"
+                if a_end - a_origin < depth:
+                    rejected["grid_too_narrow"] += 1
+                if b_end - b_origin < length:
+                    rejected["grid_too_short"] += 1
+                if not rejected:
+                    rejected["no_grid_candidates"] += 1
                 continue
 
             # Reserve a stall-pair column every 6 stalls along long rows as a
@@ -189,13 +259,13 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
             for x, y, sw, sh, is_first_row, band, slot in lot_stalls:
                 if (band, slot) in island_keys:
                     grouped_islands.setdefault((band, slot), []).append((x, y, sw, sh))
+                    rejected["divider_island"] += 1
                     continue
                 painted_stalls.append((x, y, sw, sh, is_first_row, across))
+                entry["capacity"] += 1
                 if rng.random() >= min(1.0, 0.55 * lot_density):
                     continue
-                taken.update(zone_chunks((x, y, sw, sh)))
-                zones.append(Zone("ParkingStall", x, y, sw, sh))
-                counts["mapped_parking"] += 1
+                park("mapped_parking", x, y, sw, sh, lot=entry)
 
             for parts in grouped_islands.values():
                 ix0 = min(p[0] for p in parts)
@@ -208,7 +278,7 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
             if not grouped_islands and len(lot_stalls) >= 4:
                 x0, y0, sw0, sh0, _, _, _ = lot_stalls[0]
                 lx, ly = (x0, max(0, y0 - 1)) if across else (max(0, x0 - 1), y0)
-                if 0 <= lx < w and 0 <= ly < h and hard_mask[ly, lx]:
+                if 0 <= lx < w and 0 <= ly < h and hard_mask[ly, lx] and clear_of_access(lx, ly, 1, 1):
                     lamp = C.LAMP_S if across else C.LAMP_E
                     extra_lamps.append((lx, ly, lamp))
 
@@ -240,9 +310,9 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
     def in_town(x, y):
         return _in_boxes(x, y, 1, 1, town_boxes)
 
-    street_name = street_lookup(streets_path)
+    street_name = street_lookup(streets_path, street_origin)
     jams = list(traffic_jams(asphalt_mask, road_hierarchy, jam_density,
-                             random.Random(rng_seed + 1), unavailable, taken, street_name, in_town,
+                             rng_seed + 1, unavailable, taken, street_name, in_town,
                              report))
     for (x, y, sw, sh), name in jams:
         zones.append(Zone("ParkingStall", x, y, sw, sh,
@@ -263,13 +333,10 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
                                (zone.tile_y + zone.height // 2) // 8))
 
     for rect in roadside_bays(asphalt_mask, road_hierarchy, kerb_density,
-                              random.Random(rng_seed + 2), unavailable, taken, story_chunks,
-                              story_centers, report):
-        zones.append(Zone("ParkingStall", *rect))
+                              rng_seed + 2, unavailable, taken, story_chunks,
+                              story_centers, report, parking_osm.kerb_policy if parking_osm else None):
         x, y, sw, sh = rect
-        report["roadside"].append({"street": street_name(x + sw // 2, y + sh // 2),
-                                   "x": x, "y": y, "width": sw, "height": sh})
-        counts["roadside"] += 1
+        park("roadside", *rect, street=street_name(x + sw // 2, y + sh // 2))
 
     # Broad asphalt with no road class can still be an unmapped parking area.
     if lot_density > 0:
@@ -289,9 +356,48 @@ def _detect_zones(landscape_path: str, placements, rng_seed: int = 7,
                         or unavailable(*rect)
                         or rng.random() >= 0.75 * lot_density):
                     continue
-                taken.update(chunks)
-                zones.append(Zone("ParkingStall", *rect))
-                counts["unmapped_parking"] += 1
+                park("unmapped_parking", *rect)
+
+    # Select from the already reserved bays. Lower targets leave the same layout and
+    # clearances, and cannot admit a replacement bay on a drive or a road event.
+    percent = getattr(settings, "vehicle_parking_occupancy", Settings.vehicle_parking_occupancy)
+    seed = getattr(settings, "seed", rng_seed)
+    occupancy = report["occupancy"] = {"target_percent": percent, "seed": seed, "actual": None}
+    by_street = occupancy["by_street"] = {}
+    omitted = set()
+    for group, bays in candidates.items():
+        target = (len(bays) * percent + 50) // 100  # nearest integer, halves round up
+        occupancy[group] = {"eligible": len(bays), "target": target, "exported": target}
+        if target == 0:
+            omitted.update(bay[0] for bay in bays)
+        elif target < len(bays):
+            order = sorted(bays, key=lambda bay: (bay[1], bay[2]))
+            random.Random(f"{seed}:parking occupancy:{group}").shuffle(order)
+            omitted.update(bay[0] for bay in order[target:])
+        for index, rect, kind, lot, street in bays:
+            site = lot
+            if group == "roadside":
+                site = by_street.setdefault(street, {"eligible": 0, "target": 0, "exported": 0})
+            if site is not None:
+                site["eligible"] += 1
+            if index in omitted:
+                continue
+            counts[kind] += 1
+            if site is not None:
+                site["target"] += 1
+                site["exported"] += 1
+            x, y, sw, sh = rect
+            record = {"x": x, "y": y, "width": sw, "height": sh}
+            if group == "roadside":
+                report["roadside"].append({"street": street, **record})
+            elif vehicle_report is not None:
+                report["parking"].append({"kind": kind, "osm_id": lot["osm_id"] if lot else None, **record})
+    if omitted:
+        zones = [zone for index, zone in enumerate(zones) if index not in omitted]
+    if vehicle_report is not None:
+        report["capacity_comparisons"] = [compare_lot_capacity(props, pieces, parking_osm)
+                                          for props, pieces in capacity_sites.values()]
+
     zones.extend(_forage_and_nav_zones(None, veg_arr, w, h, town_boxes,
                                        land_key=land_key))
 
@@ -336,7 +442,7 @@ def _paint_parking_lots(
 
     for x, y, sw, sh, is_first_row, across in stalls:
         if across:
-            if paint_blocks:
+            if paint_blocks and sw == STALL_W:
                 head_y = y + sh - 1 if is_first_row else y
                 for dx, colour in enumerate(C.PARKING_BLOCK_X):
                     put(x + dx, head_y, colour)
@@ -347,7 +453,7 @@ def _paint_parking_lots(
                 if right_end:
                     put(x + sw - 1, y + dy, C.EDGE_LINE_E)
         else:
-            if paint_blocks:
+            if paint_blocks and sh == STALL_W:
                 head_x = x + sw - 1 if is_first_row else x
                 for dy, colour in enumerate(C.PARKING_BLOCK_Y):
                     put(head_x, y + dy, colour)

@@ -123,17 +123,7 @@ def write(out_dir: str, map_name: str, proj, info: dict,
         spot = poly.representative_point()
         labels.append((name, "text-building", BUILDING_SCALE, spot.x, spot.y))
 
-    bbox = info.get("bbox") or {}
-    cache = os.path.join(out_dir, info["osm_cache"]) if info.get("osm_cache") \
-        else osm.cache_path(out_dir, map_name)
-    wanted = tuple(info["osm_bbox"]) if info.get("osm_bbox") else \
-        (bbox.get("south"), bbox.get("west"), bbox.get("north"), bbox.get("east"))
-    # Whatever download is beside the map, however old the filter list it was
-    # fetched with. This step never fetches one, so turning an older file away
-    # does not get the newer tags - it writes a map with the buildings on it
-    # and not one road, river or wood.
-    feats = osm.load_cache(cache, wanted, filters=None) or []
-    feats = osm.proposed_roads(feats, info.get("include_proposed_roads", 0))
+    cache, feats = osm.load_project_cache(out_dir, map_name, info)
     if not feats:
         print(f"  paper map           : no download beside the map "
               f"({os.path.basename(cache)}), so it has buildings only - "

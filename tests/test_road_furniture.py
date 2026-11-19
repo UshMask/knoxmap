@@ -24,6 +24,20 @@ def osm_node(osm_id, x, y, **tags):
 
 
 class RoadFurniturePlacement(unittest.TestCase):
+    def test_mapped_bin_snaps_off_the_pedestrian_line(self):
+        import numpy as np
+
+        vegetation, ground = self.make_road(C.DARK_GRASS)
+        passage = np.zeros((40, 40), dtype=bool)
+        passage[:, 13] = True
+        report = []
+        renderer._paint_street_furniture(
+            vegetation, ground, proj=TileProjector(), passage_mask=passage, bin_report=report,
+            features=[osm_node(1, 13, 9, amenity="waste_basket")])
+        self.assertEqual(report[0]["tile"], [14, 9])
+        self.assertNotEqual(vegetation.getpixel((13, 9)), C.BIN)
+        self.assertEqual(vegetation.getpixel((14, 9)), C.BIN)
+
     def make_road(self, roadside):
         ground = Image.new("RGB", (40, 40), C.DARK_GRASS)
         pixels = ground.load()
@@ -101,6 +115,25 @@ class RoadFurniturePlacement(unittest.TestCase):
                   if vegetation.getpixel((x, y)) in lamps
                   and (x - 13) ** 2 + (y - 20) ** 2 < furniture.FURNITURE_CLEARANCE ** 2}
         self.assertEqual(nearby, {(13, 20)})
+
+    def test_kiosks_and_postboxes_require_mapped_nodes_and_enabled_settings(self):
+        nodes = [
+            osm_node(1, 13, 8, shop="kiosk"),
+            osm_node(2, 13, 30, amenity="post_box"),
+        ]
+        for features, enabled, expected in (
+                ([], 1, 0), (nodes, 1, 1), (nodes, 0, 0)):
+            with self.subTest(mapped=bool(features), enabled=enabled):
+                vegetation, ground = self.make_road(C.DARK_GRASS)
+                with mock.patch.object(furniture, "_rule_ready", return_value=True):
+                    counts = renderer._paint_street_furniture(
+                        vegetation, ground, features=features, proj=TileProjector(),
+                        settings=StreetSettings(street_kiosks=enabled, street_postboxes=enabled))
+                self.assertEqual(counts.get("kiosk", 0), expected)
+                self.assertEqual(counts.get("postbox", 0), expected)
+                if expected:
+                    self.assertEqual(vegetation.getpixel((13, 8)), C.KIOSK_W)
+                    self.assertEqual(vegetation.getpixel((13, 30)), C.POSTBOX_W)
 
     def test_lamp_modes_and_zero_density_keep_mapped_points_when_enabled(self):
         for mode, density, count in (("osm", 3.0, 1), ("context", 0.0, 1), ("off", 3.0, 0)):
@@ -239,8 +272,9 @@ class RoadsideProps(unittest.TestCase):
         vegetation, ground = self.long_road(length=80)
         # A separate platform well away from the street.
         ground.paste(C.PALE_CONCRETE, (40, 5, 45, 12))
+        report = []
         counts = renderer._paint_street_furniture(
-            vegetation, ground, proj=TileProjector(), features=[
+            vegetation, ground, proj=TileProjector(), bin_report=report, features=[
                 osm_node(1, 13, 4, amenity="waste_basket"),
                 osm_node(2, 12, 6, highway="bus_stop"),
                 osm_node(3, 41, 6, public_transport="platform", bus="yes"),
@@ -249,7 +283,15 @@ class RoadsideProps(unittest.TestCase):
             ])
         self.assertEqual(counts.get("bin"), 2)
         self.assertEqual(vegetation.getpixel((13, 4)), C.BIN)
-        self.assertEqual(vegetation.getpixel((41, 6)), C.BIN)
+        self.assertNotEqual(vegetation.getpixel((41, 6)), C.BIN)
+        self.assertEqual(vegetation.getpixel((39, 6)), C.BIN)
+        self.assertEqual([(e["osm_id"], e["source"], e["reason"]) for e in report], [
+            (1, "osm_waste_basket", "mapped"),
+            (2, "osm_bus_stop_inferred", "near_existing_bin"),
+            (3, "osm_bus_stop_inferred", "verge"),
+            (4, "osm_bus_stop_inferred", "near_existing_bin"),
+            (5, "osm_bus_stop_inferred", "no_free_waiting_surface"),
+        ])
 
     def test_stop_bin_leaves_a_narrow_sidewalk_clear(self):
         vegetation, ground = self.long_road()
@@ -258,6 +300,32 @@ class RoadsideProps(unittest.TestCase):
             features=[osm_node(1, 12, 6, highway="bus_stop")])
         self.assertEqual(counts.get("bin"), 1)
         self.assertEqual(vegetation.getpixel((13, 6)), C.BIN)
+
+    def test_stop_leaves_the_only_verge_tile_free_when_gate_uses_it(self):
+        vegetation, ground = self.long_road()
+        vegetation.paste(C.TREES, (13, 0, 14, 24))
+        vegetation.putpixel((13, 6), C.VEG_NOTHING)
+        report = []
+        counts = renderer._paint_street_furniture(
+            vegetation, ground, proj=TileProjector(), bin_report=report,
+            features=[osm_node(1, 12, 6, highway="bus_stop"),
+                      osm_node(2, 13, 6, barrier="gate")])
+        self.assertEqual(counts.get("bin", 0), 0)
+        self.assertEqual(report[0]["reason"], "protected_access")
+        self.assertNotIn("tile", report[0])
+
+    def test_stop_bin_uses_platform_edge_only_with_a_paved_bypass(self):
+        ground = Image.new("RGB", (32, 32), C.DARK_ASPHALT)
+        for width, expected in ((1, "no_clear_side_tile"), (3, "platform_edge")):
+            with self.subTest(width=width):
+                ground.paste(C.PALE_CONCRETE, (10, 10, 10 + width, 20))
+                vegetation = Image.new("RGB", ground.size, C.VEG_NOTHING)
+                report = []
+                renderer._paint_street_furniture(
+                    vegetation, ground, proj=TileProjector(), bin_report=report,
+                    features=[osm_node(1, 10, 15, highway="bus_stop")])
+                self.assertEqual(report[0]["reason"], expected)
+                self.assertNotEqual(vegetation.getpixel((10, 15)), C.BIN)
 
     def test_zero_stop_bin_density_keeps_the_mapped_bin(self):
         vegetation, ground = self.long_road()

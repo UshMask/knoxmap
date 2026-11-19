@@ -81,6 +81,7 @@ ROAD_OFFSETS = sorted(
     key=lambda offset: offset[0] ** 2 + offset[1] ** 2,
 )
 FURNITURE_CLEARANCE = 12
+NEIGHBOURS = ((-1, 0), (0, -1), (1, 0), (0, 1))
 MAPPED_PROPS = {
     ("highway", "street_lamp"): "lamp",
     ("amenity", "waste_basket"): "bin",
@@ -140,8 +141,87 @@ def _osm_furniture(features):
             yield "stop bin", feat
 
 
+def _stop_access_tiles(features, proj, width, height):
+    """Leave a tile of clearance around mapped doors, gates and crossings."""
+    reserved = set()
+    for feat in features:
+        tags = feat.tags
+        points = feat.geometry
+        if feat.kind == "node" and (tags.get("entrance") not in (None, "no")
+                                    or tags.get("barrier") in ("gate", "lift_gate", "swing_gate")
+                                    or tags.get("highway") == "crossing"):
+            ends = points[:1]
+        elif feat.kind == "way" and tags.get("footway") == "crossing":
+            ends = points[:1] + points[-1:]
+        else:
+            continue
+        for lat, lon in ends:
+            x, y = map(round, proj.to_px(lat, lon))
+            reserved.update((px, py)
+                            for px in range(max(0, x - 1), min(width, x + 2))
+                            for py in range(max(0, y - 1), min(height, y + 2)))
+    return reserved
+
+
+def _stop_bin_tile(x, y, pavement, roadside, free, reserved, near_bin):
+    """Reach a verge from the waiting tile, or use a platform edge with a bypass."""
+    h, w = pavement.shape
+    candidates = [(x + dx, y + dy) for dx, dy in SNAP_OFFSETS
+                  if 0 <= x + dx < w and 0 <= y + dy < h and free(x + dx, y + dy)]
+    walkable = {(px, py) for px, py in candidates if pavement[py, px]}
+    waiting = next((point for point in candidates if point in walkable), None)
+    if waiting is None:
+        return None, "no_free_waiting_surface"
+    def reachable_without(blocked=None):
+        reached = {waiting}
+        pending = [waiting]
+        while pending:
+            px, py = pending.pop()
+            for dx, dy in NEIGHBOURS:
+                step = (px + dx, py + dy)
+                if step != blocked and step in walkable and step not in reached:
+                    reached.add(step)
+                    pending.append(step)
+        return reached
+
+    connected = reachable_without()
+
+    def placement(px, py):
+        if (px, py) in (waiting, (x, y)):
+            return None
+        sides = [(px + dx, py + dy) for dx, dy in NEIGHBOURS]
+        if roadside[py, px] and any(point in connected for point in sides):
+            return "verge"
+        if (px, py) not in connected or all(
+                0 <= sx < w and 0 <= sy < h and pavement[sy, sx] for sx, sy in sides):
+            return None
+        # The other three tiles of an inward square remain open.
+        if any({(px + dx, py), (px, py + dy), (px + dx, py + dy)} <= connected
+               for dx in (-1, 1) for dy in (-1, 1)) and (
+                   len(reachable_without((px, py))) == len(connected) - 1):
+            return "platform_edge"
+        return None
+
+    choices = []
+    reason = "no_clear_side_tile"
+    for px, py in candidates:
+        surface = placement(px, py)
+        if not surface:
+            continue
+        if reserved(px, py):
+            reason = "protected_access"
+        elif near_bin(px, py):
+            reason = "near_existing_bin"
+        else:
+            choices.append((surface, px, py))
+    if choices:
+        surface, px, py = min(choices, key=lambda choice: choice[0] != "verge")
+        return (px, py), surface
+    return None, reason
+
+
 def _paint_osm_furniture(out, empty, roadside, pavement, asphalt,
-                         buildings, features, proj, clip, counts, settings):
+                         buildings, features, proj, clip, counts, settings, bin_report, passage):
     """Place OSM nodes on nearby free ground and index the bins and lamps."""
     h, w = empty.shape
     placed = {"lamp": defaultdict(list), "bin": defaultdict(list)}
@@ -160,17 +240,28 @@ def _paint_osm_furniture(out, empty, roadside, pavement, asphalt,
     if clip is not None:
         from shapely.geometry import Point
 
-    def room_at_stop(x, y):
-        xs = [nx for nx in (x - 1, x + 1) if 0 <= nx < w and pavement[y, nx]]
-        ys = [ny for ny in (y - 1, y + 1) if 0 <= ny < h and pavement[ny, x]]
-        if pavement[y, x]:
-            # Leave room to go around the bin on the same paved surface.
-            return any(pavement[ny, nx] for nx in xs for ny in ys)
-        return roadside[y, x] and bool(xs or ys)
+    def free(x, y):
+        return (empty[y, x] and (buildings is None or not buildings[y, x])
+                and (clip is None or clip.covers(Point(x, y))))
+
+    def near_bin(x, y):
+        return near("bin", x, y)
+
+    def put(kind, x, y, colour):
+        out[y, x] = colour
+        empty[y, x] = False
+        counts[kind] = counts.get(kind, 0) + 1
+        if kind in placed:
+            placed[kind][x // distance, y // distance].append((x, y))
 
     # Explicit objects take priority when an inferred stop bin needs a tile.
+    features = tuple(features)
     props = sorted(_osm_furniture(features),
                    key=lambda item: (item[0] == "stop bin", item[1].osm_id))
+    access_tiles = _stop_access_tiles(features, proj, w, h) if props else set()
+
+    def reserved(x, y):
+        return (x, y) in access_tiles or passage(x, y)
     colours = {}
     if settings.street_lamp_mode != "off":
         colours["lamp"] = {f: getattr(C, f"LAMP_{f}") for f in FACES_THE_ROAD.values()}
@@ -180,39 +271,60 @@ def _paint_osm_furniture(out, empty, roadside, pavement, asphalt,
             colours[kind] = {f: getattr(C, f"{kind.upper()}_{f}") for f in FACES_THE_ROAD.values()}
 
     for what, feat in props:
+        ax, ay = proj.to_px(*feat.geometry[0])
+        x, y = round(ax), round(ay)
+        if not (0 <= x < w and 0 <= y < h):
+            continue
+        entry = None
+        if bin_report is not None and what in ("bin", "stop bin"):
+            entry = {
+                "osm_id": feat.osm_id, "anchor": [x, y],
+                "source": "osm_waste_basket" if what == "bin" else "osm_bus_stop_inferred",
+                "status": "skipped", "reason": "settings",
+            }
+            bin_report.append(entry)
         if what == "stop bin":
-            if settings.street_bin_mode != "context" or not sample_fixture(
-                    settings.street_bin_density, feat.osm_id):
+            if settings.street_bin_mode != "context":
+                continue
+            if not sample_fixture(settings.street_bin_density, feat.osm_id):
+                if entry is not None:
+                    entry["reason"] = "density"
                 continue
         elif what == "bin":
             if settings.street_bin_mode == "off":
                 continue
         elif what not in colours:
             continue
-        ax, ay = proj.to_px(*feat.geometry[0])
-        x, y = round(ax), round(ay)
-        if not (0 <= x < w and 0 <= y < h):
+        if buildings is not None and buildings[y, x]:
+            if entry is not None:
+                entry["reason"] = "inside_building"
             continue
-        if ((buildings is not None and buildings[y, x])
-                or (clip is not None and not clip.covers(Point(ax, ay)))):
+        if clip is not None and not clip.covers(Point(ax, ay)):
+            if entry is not None:
+                entry["reason"] = "outside_shape"
             continue
-        if what == "stop bin" and near("bin", x, y):
+        if what == "stop bin":
+            tile, reason = ((None, "near_existing_bin") if near_bin(x, y) else
+                            _stop_bin_tile(x, y, pavement, roadside, free, reserved, near_bin))
+            if tile is not None:
+                put("bin", *tile, C.BIN)
+                if entry is not None:
+                    entry.update(status="placed", reason=reason, tile=list(tile))
+            elif entry is not None:
+                entry["reason"] = reason
             continue
+        skipped = "no_free_surface"
         for dx, dy in SNAP_OFFSETS:
             px, py = x + dx, y + dy
-            if not (0 <= px < w and 0 <= py < h and empty[py, px]):
+            if not (0 <= px < w and 0 <= py < h and free(px, py)):
                 continue
-            if ((buildings is not None and buildings[py, px])
-                    or (clip is not None and not clip.covers(Point(px, py)))):
+            if not (roadside[py, px] or pavement[py, px]):
                 continue
-            if what == "stop bin":
-                if not room_at_stop(px, py) or near("bin", px, py):
-                    continue
-            elif not (roadside[py, px] or pavement[py, px]):
+            if reserved(px, py):
+                skipped = "protected_access"
                 continue
-            kind = "bin" if what == "stop bin" else what
             colour = C.BIN
-            if kind != "bin":
+            if what != "bin":
                 facing = "S"
                 for rx, ry in ROAD_OFFSETS:
                     nx, ny = px + rx, py + ry
@@ -220,13 +332,14 @@ def _paint_osm_furniture(out, empty, roadside, pavement, asphalt,
                         facing = (("W" if rx < 0 else "E") if abs(rx) >= abs(ry)
                                   else ("N" if ry < 0 else "S"))
                         break
-                colour = colours[kind][facing]
-            out[py, px] = colour
-            empty[py, px] = False
-            counts[kind] = counts.get(kind, 0) + 1
-            if kind in placed:
-                placed[kind][px // distance, py // distance].append((px, py))
+                colour = colours[what][facing]
+            put(what, px, py, colour)
+            if entry is not None:
+                entry.update(status="placed", reason="mapped", tile=[px, py])
             break
+        else:
+            if entry is not None:
+                entry["reason"] = skipped
     return near
 
 
@@ -295,7 +408,9 @@ def _paint_street_furniture(veg: Image.Image, landscape: Image.Image,
                             buildings: Image.Image | None = None, *,
                             road_furniture: Image.Image | None = None,
                             features=(), proj=None, clip=None,
-                            settings: StreetSettings = DEFAULT_STREET_SETTINGS) -> dict:
+                            settings: StreetSettings = DEFAULT_STREET_SETTINGS,
+                            bin_report: list[dict] | None = None,
+                            passage_mask=None) -> dict:
     """Lamps, hydrants and drains along the kerbs; grime, cracks and litter.
 
     A generated street was clean tarmac, kerb and pavement and nothing else;
@@ -410,9 +525,13 @@ def _paint_street_furniture(veg: Image.Image, landscape: Image.Image,
     }
     pole = C.UTILITY_POLE if _rule_ready("Utility pole") else None
     out = vp.copy()
+
+    def passage(x, y):
+        return passage_mask is not None and passage_mask[y, x]
+
     near_osm_prop = _paint_osm_furniture(
         out, empty, roadside, pavement, asphalt, building_tiles, features, proj, clip,
-        counts, settings)
+        counts, settings, bin_report, passage)
     # Speed signs stand where drivers keeping right see their faces: on the
     # east kerb of a north-south road facing south, the north kerb of an
     # east-west one facing east. Erika's signs only face those two ways.
@@ -450,7 +569,7 @@ def _paint_street_furniture(veg: Image.Image, landscape: Image.Image,
             x, y = gx + n * sx, gy + n * sy
             if not (0 <= x < w and 0 <= y < h):
                 return None
-            if not (empty[y, x] and not driveable[y, x] and verge[y, x]):
+            if not (empty[y, x] and not driveable[y, x] and verge[y, x]) or passage(x, y):
                 continue
             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                 nx, ny = x + dx, y + dy
@@ -464,13 +583,13 @@ def _paint_street_furniture(veg: Image.Image, landscape: Image.Image,
         x2, y2 = gx + 2 * sx, gy + 2 * sy
         if (0 <= x1 < w and 0 <= y1 < h and 0 <= x2 < w and 0 <= y2 < h
                 and pavement[y2, x2] and empty[y1, x1]
-                and not driveable[y1, x1] and roadside[y1, x1]):
+                and not driveable[y1, x1] and roadside[y1, x1] and not passage(x1, y1)):
             return x1, y1
         for n in range(2, 6):
             x, y = gx + n * sx, gy + n * sy
             if not (0 <= x < w and 0 <= y < h) or driveable[y, x]:
                 return None
-            if empty[y, x] and roadside[y, x]:
+            if empty[y, x] and roadside[y, x] and not passage(x, y):
                 return x, y
         return None
 
@@ -607,7 +726,8 @@ def _paint_street_furniture(veg: Image.Image, landscape: Image.Image,
                     continue
                 run = [(px + k * dx, py + k * dy) for k in range(len(tiles))]
                 if not all(0 <= x < w and 0 <= y < h and empty[y, x]
-                           and not driveable[y, x] and roadside[y, x] for x, y in run):
+                           and not driveable[y, x] and roadside[y, x] and not passage(x, y)
+                           for x, y in run):
                     continue
                 for (x, y), colour in zip(run, tiles):
                     out[y, x] = colour

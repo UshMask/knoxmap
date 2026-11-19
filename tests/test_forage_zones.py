@@ -8,6 +8,7 @@ from PIL import Image
 
 from generator import pz_colors as C
 from generator.osm import ROAD_HIERARCHY_CODES
+from knoxbuild.settings import Settings
 from knoxbuild.world import render_pzw
 from knoxbuild.zones_detect import _detect_zones
 from tools.make_map_mod import write_objects
@@ -29,7 +30,8 @@ class ForageAndNavZoneTests(unittest.TestCase):
             path = os.path.join(td, "land.bmp")
             Image.fromarray(land, "RGB").save(path)
             zones = _detect_zones(path, [], road_hierarchy=ranks,
-                                  keep_clear=[(45, 8, 30, 12)])
+                                  keep_clear=[(45, 8, 30, 12)],
+                                  settings=Settings(vehicle_jam_density=0))
 
         stories = [(z.tile_x, z.tile_y, z.width, z.height) for z in zones
                    if z.kind == "Nav" and min(z.width, z.height) < 15

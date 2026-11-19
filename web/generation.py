@@ -34,7 +34,7 @@ from web.common import (SAFE_NAME, _bbox_area_km2, _cos_lat, _json_body,
                         _map_dir, _worlded_exe, failed, log)
 from web.jobs import _PROGRESS_LOCK, _hold, _set_progress, _stopped, _stopper
 from web.mapfiles import (_audited, _load_edits, _load_settings, _load_sketch,
-                          _map_summary, _osm_cache_for, _population,
+                          _map_summary, _osm_cache_for, _population, _vehicle_zones_url,
                           _save_design, _save_settings, _save_sketch)
 
 bp = Blueprint("generation", __name__)
@@ -539,6 +539,7 @@ def _generate(data):
             "preview": f"/output/{map_name}/{Path(result.preview_path).name}",
             "buildings": f"/output/{map_name}/{Path(result.buildings_geojson_path).name}",
             "meta": f"/output/{map_name}/{Path(result.meta_path).name}",
+            "streetFurniture": f"/output/{map_name}/{map_name}_street_furniture.json",
             "zip": f"/download/{map_name}.zip",
             "readme": f"/output/{map_name}/README.txt",
         },
@@ -686,6 +687,7 @@ def api_buildings():
              time.time() - t0, out.getvalue()[-3000:])
     return jsonify({"count": len(tbx), "terrain": terrain,
                     "pzw": f"{map_dir.name}.pzw",
+                    "vehicleZones": _vehicle_zones_url(map_dir),
                     # So the window can say what did not get built without
                     # anybody reading a log for it.
                     "left_out": _log_left_out(map_dir),

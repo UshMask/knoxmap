@@ -1,4 +1,4 @@
-"""Crosswalks and stop lines where streets meet.
+"""Mapped crosswalks and inferred crossings and stop lines at junctions.
 
 Build 42 ships kerbs and lane lines but no zebra crossing, so a crossing here
 is laid out of the white lane-line tiles the road rules already place
@@ -13,14 +13,17 @@ on - OpenStreetMap splits a way at every change of lanes or name - and get
 nothing; counting the ways near a point would paint a crossing into the middle
 of every long road.
 
-The crossing sits just outside the junction box, across the street being
-approached, with a stop line a little further back on the approach side.
+Where OSM has a crossing, it takes precedence over the guessed crossing on
+that approach. Otherwise a crossing sits just outside the junction box with
+a stop line a little further back on the approach side.
 Diagonal streets are left alone: their stripes cannot be laid on the tile grid
 without a zigzag, and the lane lines skip them for the same reason.
 """
 from __future__ import annotations
 
+import logging
 import math
+from collections import Counter
 
 from .. import pz_colors as C
 from .geometry import _feature_coords_px, _is_polygon
@@ -32,6 +35,9 @@ JUNCTION_REACH = 1.5       # tiles: how near another street counts as meeting
 STOP_LINE_GAP = 2          # tiles between the crossing and the stop line
 MAX_JUNCTIONS = 4000       # a guard on pathological data
 CELL = 4.0                 # tiles: the grid the segment index is kept on
+MAPPED_REACH = 8.0         # tiles: look for a mapped crossing on the same approach
+
+_log = logging.getLogger("knoxmap.renderer.crossings")
 
 # Tiles the crossing is allowed to paint over: the lane lines run down the
 # middle of the street a crossing crosses, and a line through the stripes is a
@@ -43,24 +49,25 @@ _LINE_TILES = (C.LINE_WHITE_N, C.LINE_WHITE_W, C.LINE_YELLOW_N, C.LINE_YELLOW_W,
 _KERB_TILES = (C.KERB_N, C.KERB_S, C.KERB_E, C.KERB_W)
 
 
-def _street_ways(buckets, proj) -> list[tuple[list[tuple[float, float]], float]]:
+def _at_ground(tags) -> bool:
+    return (all(str(tags.get(key, "")).strip().lower() in ("", "no", "false", "0")
+                for key in ("bridge", "tunnel", "covered"))
+            and all(str(tags.get(key, "0")).strip() in ("", "0")
+                    for key in ("layer", "level")))
+
+
+def _street_ways(buckets, proj, categories=("road_major", "road_medium", "road_minor")
+                 ) -> list[tuple[list[tuple[float, float]], float]]:
     """(ring in pixels, width in tiles) for every street worth a crossing."""
     ways = []
-    for cat in ("road_major", "road_medium", "road_minor"):
+    for cat in categories:
         for feat in buckets.get(cat, []):
             if _is_polygon(feat):
                 continue
-            tags = feat.tags
-            if any(str(tags.get(key, "")).lower() in ("yes", "true", "1")
-                   for key in ("tunnel", "covered")):
-                continue
-            # A bridge crosses what is under it, not what it meets.
-            if str(tags.get("bridge", "")).lower() in ("yes", "true", "1"):
-                continue
-            if str(tags.get("layer", "0")).strip() not in ("", "0"):
+            if not _at_ground(feat.tags):
                 continue
             width = _way_width_m(feat, cat) / proj.meters_per_tile
-            if width < CROSSWALK_MIN_TILES:
+            if width < (3 if cat == "road_service" else CROSSWALK_MIN_TILES):
                 continue
             for ring in _feature_coords_px(feat, proj):
                 if len(ring) >= 2:
@@ -103,13 +110,13 @@ class _SegmentIndex:
                     self.cells.setdefault(key, []).append(index)
                     last = key
 
-    def near(self, x: float, y: float):
-        """The segments in the nine cells around a point, nearest first is not
+    def near(self, x: float, y: float, radius: int = 1):
+        """The segments in the cells around a point, nearest first is not
         needed: the callers measure the distance themselves."""
         cx, cy = int(math.floor(x / CELL)), int(math.floor(y / CELL))
         seen = set()
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
                 for index in self.cells.get((cx + dx, cy + dy), ()):
                     if index in seen:
                         continue
@@ -136,6 +143,16 @@ def _tile(value: float) -> int:
     one tile deep.
     """
     return int(math.floor(value + 0.5))
+
+
+def _stop_tile(junction: float, offset: float, direction: int, mapped: float | None) -> int:
+    stop = _tile(junction + direction * (offset + CROSSWALK_TILES + STOP_LINE_GAP))
+    if mapped is None:
+        return stop
+    start = _tile(mapped - (CROSSWALK_TILES - 1) / 2)
+    if direction > 0:
+        return max(stop, start + CROSSWALK_TILES + STOP_LINE_GAP)
+    return min(stop, start - STOP_LINE_GAP - 1)
 
 
 def junction_points(ways) -> list[tuple[float, float]]:
@@ -175,24 +192,78 @@ def junction_points(ways) -> list[tuple[float, float]]:
     return _unique(points)[:MAX_JUNCTIONS]
 
 
+def _mapped_crossings(buckets, proj, segments, widths):
+    """Match mapped footway segments to street centre lines they cross."""
+    features = [f for cat in ("paved_path", "dirt_path") for f in buckets.get(cat, ())
+                if f.kind == "way" and f.tags.get("footway") == "crossing"]
+    if not features:
+        return {}, []
+
+    from shapely.geometry import LineString
+    from shapely.strtree import STRtree
+
+    # A mapper can mark a crossing over a service road. Guessed crossings
+    # still leave those roads alone.
+    service = _street_ways(buckets, proj, ("road_service",))
+    segments = list(segments)
+    for parts, (_, width) in zip(_segments(service), service):
+        segments.extend(parts)
+        widths.extend([width] * len(parts))
+    lines = [LineString(((x0, y0), (x1, y1))) for x0, y0, x1, y1 in segments]
+    streets = STRtree(lines)
+    matched, candidates = {}, []
+    for feat in features:
+        marked = (feat.tags.get("crossing") != "unmarked"
+                  and feat.tags.get("crossing:markings") != "no")
+        status = "unsupported_level" if not _at_ground(feat.tags) else "unmatched_road"
+        if status == "unmatched_road":
+            points = _feature_coords_px(feat, proj)[0]
+            for (x0, y0), (x1, y1) in zip(points, points[1:]):
+                dx, dy = x1 - x0, y1 - y0
+                if not (dx or dy):
+                    continue
+                path = LineString(((x0, y0), (x1, y1)))
+                for i in sorted(streets.query(path, predicate="intersects")):
+                    rx, ry, ex, ey = segments[i]
+                    ux, uy = ex - rx, ey - ry
+                    # A path that follows a street, even if it touches its
+                    # centre line at an end, is not a crossing of that street.
+                    if abs(dx * uy - dy * ux) < 0.65 * path.length * lines[i].length:
+                        continue
+                    if min(abs(ux), abs(uy)) > 0.2 * max(abs(ux), abs(uy)):
+                        if status == "unmatched_road":
+                            status = "unsupported_direction"
+                        continue
+                    point = path.intersection(lines[i])
+                    if point.geom_type != "Point" or point.is_empty:
+                        continue
+                    along_x = abs(ux) >= abs(uy)
+                    key = (_tile(point.x), _tile(point.y), along_x)
+                    status = "duplicate"
+                    if key not in matched or (matched[key][-1] and not marked):
+                        matched[key] = (feat.osm_id, point.x, point.y, widths[i], marked)
+        candidates.append({"osm_id": feat.osm_id, "status": status, "marked": marked})
+    matched_ids = {item[0] for item in matched.values()}
+    return matched, [row for row in candidates if row["osm_id"] not in matched_ids]
+
+
 def paint_crossings(veg, landscape, buckets, proj) -> dict:
-    """Lay a crossing and a stop line on each approach to every junction."""
+    """Paint mapped crossings, then fill junction approaches with no mapped one."""
     import numpy as np
 
     counts = {"crosswalk": 0, "stop_line": 0, "kerb_cut": 0}
     ways = _street_ways(buckets, proj)
-    if not ways:
-        return counts
-    points = junction_points(ways)
-    if not points:
-        return counts
-
     flat, owner = [], []
     for index, own in enumerate(_segments(ways)):
         for segment in own:
             flat.append(segment)
             owner.append(index)
-    if not flat:
+    mapped, report = _mapped_crossings(buckets, proj, flat, [ways[i][1] for i in owner])
+    points = junction_points(ways)
+    if not points and not mapped:
+        if report:
+            counts["mapped"] = report
+            _log.info("OSM crossings: %s", dict(Counter(r["status"] for r in report)))
         return counts
     index = _SegmentIndex(flat)
 
@@ -246,6 +317,51 @@ def paint_crossings(veg, landscape, buckets, proj) -> dict:
                 return False
         return False
 
+    anchors = []
+    for (_, _, along_x), (osm_id, x, y, road_width, marked) in mapped.items():
+        status = "no_asphalt"
+        if road(_tile(x), _tile(y)):
+            anchors.append((x, y, along_x))
+            axis, across = (x, y) if along_x else (y, x)
+            start = _tile(axis - (CROSSWALK_TILES - 1) / 2)
+            low = math.floor(across - road_width / 2)
+            high = math.ceil(across + road_width / 2)
+            colour = C.LINE_WHITE_N if along_x else C.LINE_WHITE_W
+            laid = False
+            for tile in range(start, start + CROSSWALK_TILES):
+                if marked:
+                    for side in range(low, high + 1):
+                        px, py = (tile, side) if along_x else (side, tile)
+                        laid |= put(px, py, colour, along_x)
+                for end, outward in ((low, -1), (high, 1)):
+                    px, py = (tile, end) if along_x else (end, tile)
+                    dx, dy = (0, outward) if along_x else (outward, 0)
+                    counts["kerb_cut"] += cut(px, py, dx, dy)
+            counts["crosswalk"] += laid
+            status = "painted" if laid else "no_stripe_tiles" if marked else "unmarked"
+        report.append({"osm_id": osm_id, "status": status, "marked": marked,
+                       "tile": [_tile(x), _tile(y)]})
+
+    if report:
+        counts["mapped"] = report
+        _log.info("OSM crossings: %s", dict(Counter(r["status"] for r in report)))
+    mapped_index = _SegmentIndex([(x, y, x, y) for x, y, _along_x in anchors])
+
+    def mapped_on_approach(x, y, nx, ny, along_x):
+        junction, guessed = (nx, x) if along_x else (ny, y)
+        outermost = None
+        for i in mapped_index.near(x, y, math.ceil(MAPPED_REACH / CELL)):
+            mx, my, axis = anchors[i]
+            if axis != along_x:
+                continue
+            candidate = mx if along_x else my
+            offset = (guessed - junction) * (candidate - junction)
+            lateral = abs(my - y) if along_x else abs(mx - x)
+            if offset >= 0 and lateral <= 2.5 and (x - mx) ** 2 + (y - my) ** 2 <= MAPPED_REACH ** 2:
+                if outermost is None or abs(candidate - junction) > abs(outermost - junction):
+                    outermost = candidate
+        return outermost
+
     for jx, jy in points:
         near = []
         seen = set()
@@ -275,21 +391,21 @@ def paint_crossings(veg, landscape, buckets, proj) -> dict:
             if abs(uy) <= 0.2 * abs(ux):            # a street running east-west
                 step = 1 if ux > 0 else -1
                 for side in (1, -1):
-                    laid = False
-                    first = _tile(nx + step * side * offset)
-                    y_lo = int(math.floor(ny - across))
-                    y_hi = int(math.ceil(ny + across))
-                    for k in range(CROSSWALK_TILES):
-                        x = first + step * side * k
-                        for y in range(y_lo, y_hi + 1):
-                            laid |= put(x, y, C.LINE_WHITE_N, True)
-                        # A kerb cut at each end of the crossing, on the far
-                        # side of the carriageway from the middle of it.
-                        counts["kerb_cut"] += cut(x, y_lo, 0, -1)
-                        counts["kerb_cut"] += cut(x, y_hi, 0, 1)
-                    counts["crosswalk"] += laid
-                    stop = _tile(nx + step * side *
-                                 (offset + CROSSWALK_TILES + STOP_LINE_GAP))
+                    direction = step * side
+                    first = _tile(nx + direction * offset)
+                    mapped_axis = mapped_on_approach(first, ny, nx, ny, True) if anchors else None
+                    if mapped_axis is None:
+                        laid = False
+                        y_lo = int(math.floor(ny - across))
+                        y_hi = int(math.ceil(ny + across))
+                        for k in range(CROSSWALK_TILES):
+                            x = first + direction * k
+                            for y in range(y_lo, y_hi + 1):
+                                laid |= put(x, y, C.LINE_WHITE_N, True)
+                            counts["kerb_cut"] += cut(x, y_lo, 0, -1)
+                            counts["kerb_cut"] += cut(x, y_hi, 0, 1)
+                        counts["crosswalk"] += laid
+                    stop = _stop_tile(nx, offset, direction, mapped_axis)
                     # Right-hand traffic: approaching from the west the near
                     # lanes are the southern half, from the east the northern.
                     low = ny - across if step * side > 0 else ny
@@ -301,19 +417,21 @@ def paint_crossings(veg, landscape, buckets, proj) -> dict:
             elif abs(ux) <= 0.2 * abs(uy):          # a street running north-south
                 step = 1 if uy > 0 else -1
                 for side in (1, -1):
-                    laid = False
-                    first = _tile(ny + step * side * offset)
-                    x_lo = int(math.floor(nx - across))
-                    x_hi = int(math.ceil(nx + across))
-                    for k in range(CROSSWALK_TILES):
-                        y = first + step * side * k
-                        for x in range(x_lo, x_hi + 1):
-                            laid |= put(x, y, C.LINE_WHITE_W, False)
-                        counts["kerb_cut"] += cut(x_lo, y, -1, 0)
-                        counts["kerb_cut"] += cut(x_hi, y, 1, 0)
-                    counts["crosswalk"] += laid
-                    stop = _tile(ny + step * side *
-                                 (offset + CROSSWALK_TILES + STOP_LINE_GAP))
+                    direction = step * side
+                    first = _tile(ny + direction * offset)
+                    mapped_axis = mapped_on_approach(nx, first, nx, ny, False) if anchors else None
+                    if mapped_axis is None:
+                        laid = False
+                        x_lo = int(math.floor(nx - across))
+                        x_hi = int(math.ceil(nx + across))
+                        for k in range(CROSSWALK_TILES):
+                            y = first + direction * k
+                            for x in range(x_lo, x_hi + 1):
+                                laid |= put(x, y, C.LINE_WHITE_W, False)
+                            counts["kerb_cut"] += cut(x_lo, y, -1, 0)
+                            counts["kerb_cut"] += cut(x_hi, y, 1, 0)
+                        counts["crosswalk"] += laid
+                    stop = _stop_tile(ny, offset, direction, mapped_axis)
                     # Approaching from the north the near lanes are the
                     # western half, from the south the eastern.
                     low = nx - across if step * side > 0 else nx

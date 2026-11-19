@@ -77,7 +77,7 @@ class SliderSteps(unittest.TestCase):
         defaults = Settings()
         for f in fields(Settings):
             value = getattr(defaults, f.name)
-            if f.name not in LIMITS or isinstance(value, (bool, int, str)):
+            if f.name not in LIMITS or not isinstance(value, float):
                 continue
             lo, hi = LIMITS[f.name]
             step = 0.01 if hi - lo <= 1 else 0.05

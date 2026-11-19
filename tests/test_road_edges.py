@@ -10,7 +10,9 @@ from PIL import Image
 
 from generator.pz_colors import (MEDIUM_GRASS, MEDIUM_ASPHALT, DARK_ASPHALT,
                                  DARKEST_ASPHALT, PALE_CONCRETE)
-from generator.rendering.roads import _smooth_road_edges
+from generator import pz_colors as C
+from generator.osm import OSMFeature
+from generator.rendering.roads import _paint_roadside, _pedestrian_passages, _smooth_road_edges
 
 ASPHALT = (MEDIUM_ASPHALT, DARK_ASPHALT, DARKEST_ASPHALT)
 
@@ -29,6 +31,36 @@ def tidy(im):
 
 
 class RoadEdges(unittest.TestCase):
+    def test_one_sided_sidewalk_follows_osm_way_direction(self):
+        from types import SimpleNamespace
+        proj = SimpleNamespace(meters_per_tile=1)
+        for direction, expected in (([(5, 15), (35, 15)], (True, False)),
+                                    ([(35, 15), (5, 15)], (False, True))):
+            for tags in ({"sidewalk": "left"}, {"sidewalk:both": "separate", "sidewalk:left": "yes"}):
+                with self.subTest(direction=direction, tags=tags):
+                    ground = Image.new("RGB", (40, 30), MEDIUM_GRASS)
+                    way = OSMFeature(1, "way", {"highway": "secondary", **tags}, direction)
+                    _paint_roadside(ground, {"road_medium": [way]}, proj, lambda feat: [feat.geometry])
+                    self.assertEqual(tuple(ground.getpixel((20, y)) == PALE_CONCRETE for y in (8, 21)),
+                                     expected)
+
+    def test_mapped_walk_cuts_transverse_kerb_but_respects_private_access(self):
+        from types import SimpleNamespace
+        proj = SimpleNamespace(to_px=lambda x, y: (x, y))
+        veg = Image.new("RGB", (40, 30), C.VEG_NOTHING)
+        veg.paste(C.KERB_S, (0, 14, 40, 15))
+        ways = [
+            OSMFeature(1, "way", {"highway": "footway"}, [(12, 4), (12, 24)]),
+            OSMFeature(2, "way", {"highway": "footway", "access": "private"}, [(20, 4), (20, 24)]),
+            OSMFeature(3, "way", {"highway": "footway"}, [(25, 14), (35, 14)]),
+        ]
+        mask = _pedestrian_passages(veg, {"paved_path": ways}, proj)
+        self.assertEqual(veg.getpixel((12, 14)), C.VEG_NOTHING)
+        self.assertEqual(veg.getpixel((20, 14)), C.KERB_S)
+        self.assertEqual(veg.getpixel((30, 14)), C.KERB_S)
+        self.assertTrue(mask[14, 12])
+        self.assertFalse(mask[14, 20])
+
     def test_a_straight_street_keeps_its_pavements(self):
         im = Image.new('RGB', (60, 60), MEDIUM_GRASS)
         for y in range(10, 50):

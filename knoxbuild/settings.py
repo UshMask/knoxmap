@@ -222,6 +222,8 @@ class Settings(StreetSettings):
     vehicle_yard_density: float | None = None
     vehicle_kerb_density: float | None = None
     vehicle_jam_density: float | None = None
+    # Share of eligible car park and roadside bays exported for vehicle spawning.
+    vehicle_parking_occupancy: int = 100
 
     # Outdoor fixtures from the Build pass, separate from mapped street props.
     house_mailbox_density: float = 1.0
@@ -393,6 +395,7 @@ LIMITS = {
     "style_oddity": (0.0, 1.0),
     "parking_density": (0.0, 4.0),
     **{key: (0.0, 4.0) for key in VEHICLE_DENSITY_KEYS},
+    "vehicle_parking_occupancy": (0, 100),
     "street_lamp_mode": (0, 2),
     "street_bin_mode": (0, 2),
     "street_verge_scope": (0, 1),

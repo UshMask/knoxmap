@@ -212,13 +212,8 @@ def _drawn_features(out_dir: str, map_name: str) -> list:
 def _points_of_use(out_dir: str, info: dict, map_name: str, proj) -> dict:
     """Point features from OSM, bucketed by tile for nearby-footprint lookup."""
     from generator import osm
-    bbox = info.get("bbox") or {}
-    cache = os.path.join(out_dir, info["osm_cache"]) if info.get("osm_cache")         else osm.cache_path(out_dir, map_name)
-    wanted = tuple(info["osm_bbox"]) if info.get("osm_bbox") else         (bbox.get("south"), bbox.get("west"), bbox.get("north"), bbox.get("east"))
     grid: dict = {}
-    # As the paper map does: this reads the download, it never fetches one.
-    feats = osm.load_cache(cache, wanted, filters=None) or []
-    feats = osm.proposed_roads(feats, info.get("include_proposed_roads", 0))
+    _, feats = osm.load_project_cache(out_dir, map_name, info)
     # Points drawn by hand count too. They are kept beside the map rather than
     # in the download (web/mapfiles.py, _save_sketch), so reading only the cache left a
     # petrol station somebody placed themselves with no forecourt and no

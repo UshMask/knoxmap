@@ -177,10 +177,19 @@ def _map_summary(map_dir: Path) -> dict:
             "preview": f"/output/{map_dir.name}/{map_dir.name}_preview.png",
             "buildings": f"/output/{map_dir.name}/{map_dir.name}_buildings.geojson",
             "meta": f"/output/{map_dir.name}/{map_dir.name}_info.json",
+            "streetFurniture": (f"/output/{map_dir.name}/{map_dir.name}_street_furniture.json"
+                                if (map_dir / f"{map_dir.name}_street_furniture.json").is_file()
+                                else None),
+            "vehicleZones": _vehicle_zones_url(map_dir) if built else None,
             "zip": f"/download/{map_dir.name}.zip",
             "readme": f"/output/{map_dir.name}/README.txt",
         },
     }
+
+
+def _vehicle_zones_url(map_dir: Path) -> str | None:
+    filename = f"{map_dir.name}_vehicle_zones.json"
+    return f"/output/{map_dir.name}/{filename}" if (map_dir / filename).is_file() else None
 
 
 def _population(map_dir: Path) -> dict | None:

@@ -8,12 +8,104 @@ from PIL import Image, ImageDraw
 
 from .. import pz_colors as C
 from ..osm import OSMFeature, ROAD_HIERARCHY_CODES, road_hierarchy
-from .crossings import paint_crossings
+from .crossings import _at_ground, paint_crossings
 from .geometry import _draw_roads, _feature_coords_px, _is_polygon, _pixel_width
 from .landcover import DENSE_COVERAGE, GREEN_CATEGORIES, MAX_PAVED_BLOCK
 from .projection import Projector
-from .widths import (ROAD_WIDTHS_M, _road_markings, _sidewalk_width_m,
-                     _way_width_m)
+from .widths import (ROAD_WIDTHS_M, _road_markings, _sidewalk_sides_m, _sidewalk_width_m,
+                     _verge_width_m, _way_width_m)
+
+
+def _paint_roadside(landscape, buckets, proj, ground_rings, *, crisp=False):
+    """Paint road shoulders and sidewalks, retaining the direction of tagged ways."""
+    from shapely.geometry import LineString
+
+    draw = ImageDraw.Draw(landscape)
+    mpt = proj.meters_per_tile
+    for fill, sidewalk in ((C.PALE_CONCRETE, True), (C.DARK_GRASS, False)):
+        strokes, sided = [], []
+        for road in ("road_service", "road_minor", "road_medium", "road_major"):
+            for feat in buckets.get(road, []):
+                if _is_polygon(feat):
+                    continue
+                w_road = _pixel_width(_way_width_m(feat, road), mpt)
+                v_m = _verge_width_m(feat, road)
+                verge = max(1, int(v_m / mpt + 0.49)) if v_m > 0 else 0
+                left, right = _sidewalk_sides_m(feat, road)
+
+                def extent(width):
+                    if not sidewalk:
+                        return verge
+                    if width <= v_m:
+                        return 0
+                    tiles = max(1, round((width - v_m) / mpt))
+                    r_v = (w_road + 2 * verge - 1) / 2
+                    if int((r_v + tiles) * math.sqrt(2)) - math.ceil(r_v * math.sqrt(2)) + 1 < 4:
+                        tiles += 1
+                    return verge + tiles
+
+                a, b = extent(left), extent(right)
+                if not (a or b):
+                    continue
+                rings = ground_rings(feat)
+                if a == b:
+                    strokes.append((w_road + 2 * a, rings))
+                else:
+                    sided.append((w_road, a, b, rings))
+        _draw_roads(landscape, strokes, fill, crisp=crisp)
+        for w_road, left, right, rings in sided:
+            for ring in rings:
+                if len(set(ring)) < 2:
+                    continue
+                line = LineString(ring)
+                # Projected tile y grows south, reversing Shapely's left/right.
+                for tiles, sign in ((left, -1), (right, 1)):
+                    if tiles:
+                        poly = line.buffer(sign * ((w_road - 1) / 2 + tiles), single_sided=True,
+                                           join_style="mitre" if crisp else "bevel")
+                        for part in getattr(poly, "geoms", (poly,)):
+                            if not part.is_empty:
+                                draw.polygon(list(part.exterior.coords), fill=fill)
+
+
+def _pedestrian_passages(veg, buckets, proj):
+    """Keep the centre of mapped walking routes clear and drop transverse kerbs."""
+    paths = Image.new("L", veg.size)
+    across_x = Image.new("L", veg.size)
+    across_y = Image.new("L", veg.size)
+    path_draw, x_draw, y_draw = map(ImageDraw.Draw, (paths, across_x, across_y))
+    for category in ("paved_path", "dirt_path"):
+        for feat in buckets.get(category, ()):
+            tags = feat.tags
+            foot = tags.get("foot")
+            if (_is_polygon(feat) or not _at_ground(tags) or foot in {"no", "private"}
+                    or tags.get("access") in {"no", "private"}
+                    and foot not in {"yes", "designated", "permissive"}):
+                continue
+            for ring in _feature_coords_px(feat, proj):
+                points = [(round(x), round(y)) for x, y in ring]
+                for (ax, ay), (bx, by) in zip(points, points[1:]):
+                    dx, dy = abs(bx - ax), abs(by - ay)
+                    if not (dx or dy):
+                        continue
+                    segment = (ax, ay, bx, by)
+                    path_draw.line(segment, fill=255)
+                    if dx * 2 >= dy:
+                        x_draw.line(segment, fill=255, width=2)
+                    if dy * 2 >= dx:
+                        y_draw.line(segment, fill=255, width=2)
+    if not paths.getbbox():
+        return None
+
+    import numpy as np
+
+    pixels = np.asarray(veg)
+    for mask, kerbs in ((across_x, (C.KERB_W, C.KERB_E)),
+                        (across_y, (C.KERB_N, C.KERB_S))):
+        cut = np.asarray(mask).astype(bool)
+        cut &= np.all(pixels == kerbs[0], axis=2) | np.all(pixels == kerbs[1], axis=2)
+        veg.paste(C.VEG_NOTHING, mask=Image.fromarray(cut))
+    return np.asarray(paths)
 
 
 def _road_hierarchy_image(buckets: dict[str, list[OSMFeature]], proj: Projector) -> Image.Image:

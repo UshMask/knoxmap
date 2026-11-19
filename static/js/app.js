@@ -2314,6 +2314,22 @@ function wireDownload(link, name, label) {
   link.addEventListener('click', e => { e.preventDefault(); saveFile(name, label); });
 }
 
+function showVehicleZonesReport(href) {
+  document.getElementById('vehicleZonesReport')?.remove();
+  if (!href) return;
+  const label = 'Vehicle zones report (JSON)';
+  const row = document.createElement('li');
+  row.id = 'vehicleZonesReport';
+  const link = document.createElement('a');
+  link.href = href;
+  link.target = '_blank';
+  link.download = '';
+  link.textContent = label;
+  row.append('→ ', link);
+  document.getElementById('downloads').append(row);
+  wireDownload(link, href.split('/').pop(), label);
+}
+
 // Done with this map: put the page back as it was before Generate, ready for
 // another area. The map itself stays on disk; nothing is stopped or deleted.
 document.getElementById('resultsClose').addEventListener('click', () => {
@@ -2375,9 +2391,10 @@ function renderResults(data) {
     ['Zombie spawn BMP', data.files.spawn],
     ['Preview PNG', data.files.preview],
     ['Building footprints (GeoJSON)', data.files.buildings],
+    ['Street furniture report (JSON)', data.files.streetFurniture],
     ['Meta (JSON)', data.files.meta],
     ['README', data.files.readme],
-  ];
+  ].filter(([, href]) => href);
   const ul = document.getElementById('downloads');
   ul.innerHTML = entries.map(([label, href]) =>
     `<li>→ <a href="${href}" target="_blank" download>${label}</a></li>`
@@ -2386,6 +2403,7 @@ function renderResults(data) {
     const href = entries[i][1];
     wireDownload(link, href.split('/').pop(), entries[i][0]);
   });
+  showVehicleZonesReport(data.files.vehicleZones);
   setupPipeline(data);
   section.scrollIntoView({ behavior: 'smooth' });
 }
@@ -2880,6 +2898,7 @@ document.getElementById('buildingsBtn').addEventListener('click', async () => {
     }
     if (!res.ok) throw apiError(data, res);
     if (data.terrain) renderResults(data.terrain);
+    showVehicleZonesReport(data.vehicleZones);
     renderCensus(data.population);
     showBuilt(`${data.count} buildings → ${data.pzw}`);
     showLeftOut(data.left_out);

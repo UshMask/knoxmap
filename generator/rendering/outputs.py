@@ -31,6 +31,9 @@ def _places(feats: list[OSMFeature], proj: Projector) -> list[dict]:
 
 
 AREA_TAGS = {"landuse", "amenity", "leisure", "name", "religion"}
+PARKING_TAGS = {"parking", "capacity", "parking:orientation", "orientation", "restriction",
+                "access", "motor_vehicle", "motorcar", "level", "layer",
+                "bridge", "tunnel", "covered", "location"}
 
 
 def _areas_geojson(buckets: dict[str, list[OSMFeature]]) -> dict:
@@ -48,10 +51,26 @@ def _areas_geojson(buckets: dict[str, list[OSMFeature]]) -> dict:
             polys = [[r] for r in rings if len(r) >= 3]
             if not polys:
                 continue
+            props = {k: v for k, v in f.tags.items() if k in AREA_TAGS}
+            if cat == "parking":
+                props.update({k: v for k, v in f.tags.items() if k in PARKING_TAGS})
+                props["osm_id"] = f.osm_id
+                props["osm_kind"] = f.kind
+                if f.kind == "relation":
+                    from shapely.geometry import Polygon
+
+                    for role, ring in f.role_geoms:
+                        if role != "inner" or len(ring) < 4:
+                            continue
+                        hole = [[lon, lat] for lat, lon in ring]
+                        spot = Polygon(hole).representative_point()
+                        for poly in polys:
+                            if Polygon(poly[0]).covers(spot):
+                                poly.append(hole)
+                                break
             features.append({
                 "type": "Feature",
-                "properties": {"category": cat,
-                               **{k: v for k, v in f.tags.items() if k in AREA_TAGS}},
+                "properties": {"category": cat, **props},
                 "geometry": {"type": "MultiPolygon", "coordinates": polys},
             })
     return {"type": "FeatureCollection", "features": features}

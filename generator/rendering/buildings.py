@@ -163,7 +163,8 @@ def _houses_from_addresses(feats: list["OSMFeature"], buildings: list["OSMFeatur
         ring = [(x - half_w, y - half_h), (x + half_w, y - half_h),
                 (x + half_w, y + half_h), (x - half_w, y + half_h),
                 (x - half_w, y - half_h)]
-        tags = {k: v for k, v in f.tags.items() if k in BUILDING_TAGS}
+        # A date on an address point can belong to the business, not its walls.
+        tags = {k: v for k, v in f.tags.items() if k in BUILDING_TAGS and k != "start_date"}
         tags.setdefault("building", "house")
         made.append(OSMFeature(osm_id=f.osm_id, kind="way", tags=tags,
                                geometry=[proj.to_latlon(px, py) for px, py in ring]))
@@ -172,7 +173,7 @@ def _houses_from_addresses(feats: list["OSMFeature"], buildings: list["OSMFeatur
 
 BUILDING_TAGS = {
     "building", "building:levels", "building:part", "building:material",
-    "building:use", "height", "levels", "roof:levels", "roof:shape",
+    "building:use", "height", "levels", "roof:levels", "roof:shape", "start_date",
     "name", "addr:housenumber", "addr:street", "addr:flats",
     "amenity", "shop", "leisure", "tourism", "industrial",
     "healthcare", "office", "craft", "man_made", "residential", "cuisine",

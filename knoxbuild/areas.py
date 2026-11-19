@@ -84,8 +84,10 @@ class AreaIndex:
             for poly in polys:
                 if not poly or len(poly[0]) < 3:
                     continue
-                ring = [proj.to_px(lat, lon) for lon, lat in poly[0]]
-                shape = Polygon(ring)
+                rings = [[proj.to_px(lat, lon) for lon, lat in ring] for ring in poly if len(ring) >= 3]
+                if not rings:
+                    continue
+                shape = Polygon(rings[0], rings[1:])
                 if not shape.is_valid:
                     shape = shape.buffer(0)
                 for part in parts(shape):

@@ -54,7 +54,7 @@ const SETTING_LABELS = {
   street_lamp_mode:    ['Street lamp placement', 'Local rules add lamps near buildings and on streets marked as lit. Unlit streets get only mapped lamps.'],
   street_lamp_density: ['Automatic lamps', 'Scales lamps placed by the local rules, including those in car parks and works yards. Mapped lamps keep their places.'],
   street_pole_density: ['Utility poles', 'Scales poles on verges by road class.'],
-  street_bin_mode:     ['Public bin placement', 'Local rules add bins at bus stops where there is room to pass.'],
+  street_bin_mode:     ['Public bin placement', 'Local rules add bins beside bus stop waiting areas when there is room to pass.'],
   street_bin_density:  ['Bins at bus stops', 'Share of eligible stops that get an automatic bin. Mapped bins keep their places.'],
   street_verge_scope:  ['Benches and hydrants placement', 'Choose whether to limit benches and hydrants to sidewalks near buildings.'],
   street_bench_density: ['Benches', 'Scales benches on free tiles beside sidewalks.'],
@@ -69,6 +69,7 @@ const SETTING_LABELS = {
   parking_density:     ['Car parks', 'Enables more marked bays for vehicle spawning. The game’s Car Spawn Rate sets their chance of filling. Painted bays remain visible at zero.'],
   vehicle_yard_density: ['Yards and driveways', 'Scales vehicle spawn places on driveways and in yards.'],
   vehicle_kerb_density: ['Roadside parking', 'Scales bays that fit along the asphalt edge and leave a lane open.'],
+  vehicle_parking_occupancy: ['Target parking occupancy (%)', 'Share of eligible bays on car parks and roadsides offered for spawning. At 0% markings stay visible. In-game vehicle counts depend on spawn settings.'],
   vehicle_jam_density: ['Traffic jams', 'Scales traffic jams spread across major roads. The game’s Traffic Jams option enables them.'],
   basement_share:      ['Basements', 'The share of houses with a basement. Schools, hospitals, police stations and the like always get one.'],
   max_basement_depth:  ['Deepest basement', 'Levels a military base may go down, up to 32. 0 builds no basements at all.'],
@@ -124,7 +125,8 @@ const SETTING_GROUPS = {
     sections: [
       ['Lighting and poles', ['street_lamp_mode', 'street_lamp_density', 'street_pole_density']],
       ['Public bins', ['street_bin_mode', 'street_bin_density']],
-      ['Vehicles', ['parking_density', 'vehicle_yard_density', 'vehicle_kerb_density', 'vehicle_jam_density']],
+      ['Vehicles', ['parking_density', 'vehicle_kerb_density', 'vehicle_parking_occupancy',
+                    'vehicle_yard_density', 'vehicle_jam_density']],
     ],
     advanced: [
       ['Sidewalks and signs', ['street_verge_scope', 'street_bench_density', 'street_hydrant_density',
@@ -695,6 +697,7 @@ async function reapply() {
     const built = await post('/api/buildings',
                              { mapName: openedMap.mapName, settings });
     if (!built) { say('Stopped. Nothing was thrown away.'); return; }
+    showVehicleZonesReport(built.vehicleZones);
     renderCensus(built.population);
     document.getElementById('worldedBtn').disabled = false;
     document.getElementById('compileBtn').disabled = false;

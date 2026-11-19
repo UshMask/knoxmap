@@ -48,6 +48,11 @@ def painted(vegetation, colours):
             if vegetation.getpixel((x, y)) in colours}
 
 
+def mapped(osm_id, y, **tags):
+    return osm.OSMFeature(osm_id, "way", {"highway": "footway", "footway": "crossing", **tags},
+                          [(y, 11), (y, 29)])
+
+
 class JunctionDetection(unittest.TestCase):
     def test_a_point_where_four_ways_meet_is_a_junction(self):
         _vegetation, _ground, buckets = cross_junction()
@@ -76,6 +81,68 @@ class JunctionDetection(unittest.TestCase):
 
 
 class Crossings(unittest.TestCase):
+    def test_mapped_midblock_crossing_and_duplicate(self):
+        veg, ground, buckets = cross_junction(split=False)
+        buckets["paved_path"] = [mapped(5, 8), mapped(6, 8)]
+        counts = crossings.paint_crossings(veg, ground, buckets, projection())
+        self.assertEqual(counts["crosswalk"], 1)
+        self.assertEqual(counts["stop_line"], 0)
+        self.assertEqual({row["status"] for row in counts["mapped"]}, {"painted", "duplicate"})
+        self.assertEqual(veg.getpixel((20, 8)), C.LINE_WHITE_W)
+
+    def test_mapped_unmarked_crossing_cuts_kerbs_and_replaces_the_guessed_zebra(self):
+        for tags in ({"crossing": "unmarked"}, {"crossing:markings": "no"}):
+            with self.subTest(tags=tags):
+                veg, ground, buckets = cross_junction()
+                buckets["paved_path"] = [mapped(5, 27, **tags)]
+                for x in (14, 26):
+                    veg.putpixel((x, 27), C.KERB_N)
+                counts = crossings.paint_crossings(veg, ground, buckets, projection())
+                self.assertEqual(counts["mapped"], [
+                    {"osm_id": 5, "status": "unmarked", "marked": False, "tile": [20, 27]},
+                ])
+                for x in (14, 26):
+                    self.assertEqual(veg.getpixel((x, 27)), C.VEG_NOTHING)
+                for y in range(26, 30):
+                    self.assertEqual(veg.getpixel((20, y)), C.VEG_NOTHING)
+                self.assertEqual(veg.getpixel((20, 15)), C.LINE_WHITE_W)
+
+    def test_mapped_marked_crossing_replaces_a_nearby_inferred_one(self):
+        veg, ground, buckets = cross_junction()
+        buckets["paved_path"] = [mapped(5, 33, crossing="traffic_signals")]
+        counts = crossings.paint_crossings(veg, ground, buckets, projection())
+        self.assertEqual(counts["mapped"][0]["status"], "painted")
+        self.assertEqual(counts["stop_line"], 4)
+        self.assertEqual(veg.getpixel((20, 33)), C.LINE_WHITE_W)
+        self.assertEqual(veg.getpixel((20, 26)), C.VEG_NOTHING)
+        self.assertEqual(veg.getpixel((20, 30)), C.VEG_NOTHING)
+        self.assertEqual(veg.getpixel((20, 37)), C.LINE_WHITE_N)
+
+    def test_mapped_crossing_preserves_the_opposite_approach(self):
+        veg, ground, buckets = cross_junction()
+        buckets["paved_path"] = [mapped(5, 22, crossing="unmarked")]
+        crossings.paint_crossings(veg, ground, buckets, projection())
+        self.assertEqual(veg.getpixel((20, 15)), C.LINE_WHITE_W)
+        self.assertEqual(veg.getpixel((20, 26)), C.VEG_NOTHING)
+
+    def test_non_ground_paths_and_unmatched_crossings_have_no_stripes(self):
+        veg, ground, buckets = cross_junction(split=False)
+        buckets["paved_path"] = [mapped(5, 8, bridge="footbridge"),
+                                 osm.OSMFeature(6, "way", {"footway": "crossing"},
+                                                [(6, 2), (6, 5)])]
+        counts = crossings.paint_crossings(veg, ground, buckets, projection())
+        self.assertEqual(counts["crosswalk"], 0)
+        self.assertEqual([row["status"] for row in counts["mapped"]],
+                         ["unsupported_level", "unmatched_road"])
+
+    def test_mapped_unmarked_crossing_can_use_a_service_road(self):
+        veg, ground, buckets = cross_junction(split=False)
+        buckets["road_service"] = buckets.pop("road_medium")
+        buckets["paved_path"] = [mapped(5, 8, crossing="unmarked")]
+        counts = crossings.paint_crossings(veg, ground, buckets, projection())
+        self.assertEqual(counts["mapped"][0]["status"], "unmarked")
+        self.assertEqual(counts["crosswalk"], 0)
+
     def test_stripes_run_along_each_street_just_outside_the_junction(self):
         vegetation, ground, buckets = cross_junction()
         counts = crossings.paint_crossings(vegetation, ground, buckets, projection())

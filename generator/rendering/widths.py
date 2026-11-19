@@ -60,13 +60,22 @@ VERGE_BY_HIERARCHY_M = {
 
 
 def _sidewalk_width_m(feat: OSMFeature, cat: str) -> float:
+    return max(_sidewalk_sides_m(feat, cat))
+
+
+def _sidewalk_sides_m(feat: OSMFeature, cat: str) -> tuple[float, float]:
+    """Widths including verge, in OSM way order (left, right)."""
     tags = feat.tags
-    both = tags.get("sidewalk:both", tags.get("sidewalk", ""))
-    if all(tags.get(f"sidewalk:{side}", both) in {"no", "none", "separate"}
-           for side in ("left", "right")):
-        return 0.0
-    return SIDEWALK_BY_HIERARCHY_M.get(road_hierarchy(feat.tags),
-                                      SIDEWALK_M.get(cat, 0.0))
+    common = tags.get("sidewalk:both", tags.get("sidewalk", ""))
+    default = SIDEWALK_BY_HIERARCHY_M.get(road_hierarchy(tags), SIDEWALK_M.get(cat, 0.0))
+
+    def width(side: str) -> float:
+        value = tags.get(f"sidewalk:{side}", common)
+        if value in {"no", "none", "separate"} or value in {"left", "right"} and value != side:
+            return 0.0
+        return default
+
+    return width("left"), width("right")
 
 
 def _verge_width_m(feat: OSMFeature, cat: str) -> float:

@@ -302,14 +302,63 @@ class RoadHierarchyTests(unittest.TestCase):
                 '<point x="640" y="41"/></points></street>'
                 '<street name="South" width="12"><points><point x="0" y="181"/>'
                 '<point x="640" y="181"/></points></street></streets>', encoding="utf-8")
-            report = {}
-            zones = building._detect_zones(
-                str(project / "ground.bmp"), [], settings=SimpleNamespace(
-                    parking_density=0, vehicle_jam_density=1), road_hierarchy=hierarchy,
-                streets_path=str(streets), vehicle_report=report)
+            def detect(origin=(0, 0)):
+                report = {}
+                zones = building._detect_zones(
+                    str(project / "ground.bmp"), [], settings=SimpleNamespace(
+                        parking_density=0, vehicle_jam_density=1), road_hierarchy=hierarchy,
+                    streets_path=str(streets), street_origin=origin, vehicle_report=report)
+                return report, zones
+
+            report, zones = detect()
+            # The paper map exports world coordinates when placed beside Knox County.
+            text = streets.read_text(encoding="utf-8")
+            for local, world in (('x="0"', 'x="21000"'), ('x="640"', 'x="21640"'),
+                                 ('y="41"', 'y="641"'), ('y="181"', 'y="781"')):
+                text = text.replace(local, world)
+            streets.write_text(text, encoding="utf-8")
+            self.assertEqual(report, detect((21000, 600))[0])
 
         self.assertEqual({jam["street"] for jam in report["jams"]}, {"North", "South"})
         self.assertEqual(report["counts"]["traffic_jams"], sum(bool(z.name) for z in zones))
+
+    def test_local_road_reservation_does_not_reroll_distant_vehicle_zones(self):
+        with TemporaryDirectory() as directory:
+            project = Path(directory)
+            path = project / "ground.bmp"
+            ground = Image.new("RGB", (768, 800), renderer.C.DARK_GRASS)
+            hierarchy = np.zeros((800, 768), dtype=np.uint8)
+            for y in (36, 720):
+                ground.paste(renderer.C.MEDIUM_ASPHALT, (0, y, 768, y + 12))
+                hierarchy[y:y + 12, :] = osm.ROAD_HIERARCHY_CODES["primary"]
+            ground.save(path)
+            streets = project / "streets.xml"
+            streets.write_text(
+                '<streets><street name="North" width="12"><points><point x="0" y="42"/>'
+                '<point x="768" y="42"/></points></street>'
+                '<street name="South" width="12"><points><point x="0" y="726"/>'
+                '<point x="768" y="726"/></points></street></streets>', encoding="utf-8")
+
+            def detect(keep_clear=()):
+                report = {}
+                building._detect_zones(
+                    str(path), [], settings=SimpleNamespace(parking_density=1.0),
+                    keep_clear=keep_clear, road_hierarchy=hierarchy,
+                    streets_path=str(streets), vehicle_report=report)
+                return report
+
+            original = detect()
+            self.assertEqual(original, detect())
+            reserved = detect(((0, 30, 768, 24),))
+
+        for kind in ("jams", "roadside"):
+            with self.subTest(kind=kind):
+                before = [zone for zone in original[kind] if zone["street"] == "South"]
+                after = [zone for zone in reserved[kind] if zone["street"] == "South"]
+                self.assertTrue(before)
+                self.assertEqual(before, after)
+                self.assertTrue(any(zone["y"] < 100 for zone in original[kind]))
+                self.assertFalse(any(zone["y"] < 100 for zone in reserved[kind]))
 
 
 if __name__ == "__main__":

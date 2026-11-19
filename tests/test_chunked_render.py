@@ -7,7 +7,9 @@ from unittest import mock
 import numpy as np
 from PIL import Image
 
-from generator import chunked, osm
+import knoxfiles
+import knoxstop
+from generator import chunked, osm, pz_colors as C
 from generator.rendering.noise import global_tile_offset, lattices, smooth_noise
 from tools.regression_maps import LAT_PER_M, LON_PER_M, SOUTH, WEST, scenario_features
 from web.checks import _beyond_this_pc, _too_big_for_memory
@@ -69,7 +71,7 @@ class ChunkedRenderTests(unittest.TestCase):
                 "_ground_base.bmp", "_veg_base.bmp", "_ZombieSpawnMap.bmp",
                 "_preview.png", "_buildings.geojson", "_areas.geojson",
                 "_fences.geojson", "_fence_openings.geojson",
-                "_structures.json", "_places.json", "_info.json",
+                "_structures.json", "_places.json", "_street_furniture.json", "_info.json",
             ):
                 self.assertTrue((Path(td) / f"stitched{suffix}").exists(), suffix)
             info = json.loads((Path(td) / "stitched_info.json").read_text(encoding="utf-8"))
@@ -104,18 +106,23 @@ class ChunkedRenderTests(unittest.TestCase):
 
     def test_render_chunked_resumes_from_checkpoint(self):
         feats = scenario_features("village")
+        # A finished chunk's report must survive resuming, and later chunks
+        # must use global tiles too.
+        for osm_id, x, y in ((999003, 245, 400), (999004, 340, 140)):
+            feats.append(osm.OSMFeature(osm_id, "node", {"amenity": "waste_basket"},
+                                        [(SOUTH + y * LAT_PER_M, WEST + x * LON_PER_M)]))
         with tempfile.TemporaryDirectory() as td:
             calls = 0
+            completed = 0
 
             ckpt_file = Path(td) / ".resumed_chunks.json"
+            real_write = knoxfiles.write
 
-            def stop_after_two():
-                if not ckpt_file.exists():
-                    return False
-                try:
-                    return len(json.loads(ckpt_file.read_text(encoding="utf-8")).get("done", [])) >= 2
-                except Exception:
-                    return False
+            def write_checkpoint(path, payload, **kwargs):
+                nonlocal completed
+                real_write(path, payload, **kwargs)
+                if Path(path) == ckpt_file:
+                    completed = len(payload["done"])
 
             orig_render = chunked.R.render if hasattr(chunked, "R") else None
             self.assertIsNone(orig_render)
@@ -127,8 +134,9 @@ class ChunkedRenderTests(unittest.TestCase):
                 calls += 1
                 return real_render(*args, **kwargs)
 
-            with mock.patch.object(R, "render", side_effect=counting_render):
-                with self.assertRaises(Exception):
+            with (mock.patch.object(R, "render", side_effect=counting_render),
+                  mock.patch.object(knoxfiles, "write", side_effect=write_checkpoint)):
+                with self.assertRaises(knoxstop.Stopped):
                     chunked.render_chunked(
                         feats,
                         SOUTH, WEST,
@@ -137,7 +145,8 @@ class ChunkedRenderTests(unittest.TestCase):
                         td, "resumed",
                         chunk_cells=1,
                         halo_tiles=16,
-                        should_stop=stop_after_two,
+                        tree_density=0,
+                        should_stop=lambda: completed >= 2,
                     )
                 self.assertTrue(ckpt_file.exists())
                 done_so_far = len(json.loads(ckpt_file.read_text(encoding="utf-8")).get("done", []))
@@ -152,11 +161,19 @@ class ChunkedRenderTests(unittest.TestCase):
                     td, "resumed",
                     chunk_cells=1,
                     halo_tiles=16,
+                    tree_density=0,
                 )
                 self.assertEqual(calls, 4 - done_so_far)
                 self.assertFalse((Path(td) / ".resumed_chunks.json").exists())
                 self.assertFalse((Path(td) / ".resumed_preview_wip.png").exists())
                 self.assertEqual((res.width, res.height), (600, 600))
+                report = json.loads((Path(td) / "resumed_street_furniture.json").read_text(encoding="utf-8"))
+                self.assertEqual([entry["osm_id"] for entry in report["bins"]], [999003, 999004])
+                with Image.open(Path(td) / "resumed_veg.bmp") as image:
+                    for entry in report["bins"]:
+                        self.assertEqual(image.getpixel(tuple(entry["tile"])), C.BIN)
+                self.assertLess(report["bins"][0]["tile"][0], 300)
+                self.assertGreater(report["bins"][1]["tile"][0], 300)
 
 
 if __name__ == "__main__":

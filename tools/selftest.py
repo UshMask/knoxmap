@@ -246,6 +246,11 @@ def town() -> list[OSMFeature]:
     lake.role_geoms = assemble_rings(lake.role_geoms)
     lake.geometry = [ring for _r, ring in lake.role_geoms]
     feats.append(lake)
+    # These objects now require explicit OSM points on a free verge or pavement.
+    feats.extend((
+        OSMFeature(next(_ids), "node", {"shop": "kiosk"}, [_ll(86, 145)]),
+        OSMFeature(next(_ids), "node", {"amenity": "post_box"}, [_ll(74, 215)]),
+    ))
     return feats
 
 
