@@ -227,12 +227,6 @@
 
     <section class="panel" data-card="style">
       <h2>2. Settings</h2>
-      <select id="preset" hidden>
-        <option value="town" selected>Town</option>
-        <option value="suburb">Suburb</option>
-        <option value="city">City</option>
-        <option value="rural">Rural</option>
-      </select>
       <!-- Zones (Tools, Zones) set some of these differently in parts of the
            map; this says so, and opens them. -->
       <details id="zonesNotice" class="zones-notice" hidden>
@@ -273,13 +267,33 @@
             </datalist>
           </label>
           <div class="setting setting-static">
-            <div class="field-label">Kind of place</div>
-            <div class="preset-cards" id="presetCards" role="radiogroup" aria-label="Kind of place">
-              <button type="button" class="preset-card is-on" data-preset="town" role="radio" aria-checked="true">Town</button>
-              <button type="button" class="preset-card" data-preset="suburb" role="radio" aria-checked="false">Suburb</button>
-              <button type="button" class="preset-card" data-preset="city" role="radio" aria-checked="false">City</button>
-              <button type="button" class="preset-card" data-preset="rural" role="radio" aria-checked="false">Rural</button>
+            <label class="field-label" for="preset">Presets</label>
+            <select id="preset">
+              <option value="" hidden>Current settings</option>
+              <optgroup label="Built-in presets">
+                <option value="town" selected>Town</option>
+                <option value="suburb">Suburb</option>
+                <option value="city">City</option>
+                <option value="rural">Rural</option>
+              </optgroup>
+              <optgroup id="userGenerationPresets" label="My presets" hidden></optgroup>
+            </select>
+            <div class="generation-preset-actions">
+              <button type="button" id="generationPresetSave" class="btn btn-small">Save as preset…</button>
+              <details id="generationPresetManage" hidden>
+                <summary>Manage preset</summary>
+                <button type="button" id="generationPresetUpdate" class="btn btn-small">Update from settings</button>
+                <button type="button" id="generationPresetRename" class="btn btn-small">Rename</button>
+                <button type="button" id="generationPresetDelete" class="btn btn-small">Delete preset</button>
+              </details>
             </div>
+            <form id="generationPresetForm" class="generation-preset-actions" hidden>
+              <input id="generationPresetName" aria-label="Preset name" placeholder="Preset name"
+                     maxlength="60" required>
+              <button type="submit" class="btn btn-small">Save</button>
+              <button type="button" id="generationPresetCancel" class="btn btn-small">Cancel</button>
+            </form>
+            <p id="generationPresetStatus" class="hint" role="status" hidden></p>
           </div>
           <!-- Drawn like the generated settings' switches (settingElement). -->
           <div class="setting setting-static setting-compact setting-switch">
@@ -303,7 +317,7 @@
           </div>
         </div>
       </div>
-      <button type="button" id="resetSettings" class="linkish">Reset to the defaults for this kind of place</button>
+      <button type="button" id="resetSettings" class="linkish">Reset to preset</button>
 
       <details id="steamLibraries">
         <summary>Steam libraries</summary>

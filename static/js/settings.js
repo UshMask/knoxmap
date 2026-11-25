@@ -69,11 +69,13 @@ const SETTING_LABELS = {
 };
 
 let settingsMeta = null;
+let generationPresets = [];
 
 async function loadSettings() {
   const res = await fetch('/api/settings');
   settingsMeta = await res.json();
   buildSettingsForm(settingsMeta.current);
+  refreshGenerationPresets();
 }
 
 // The settings are drawn as tabs, one card each: what a tab is mostly used
@@ -351,11 +353,9 @@ function settingGroup(name, group, values) {
   return card;
 }
 
-// The card's own keys back to the chosen kind of place's values, and nothing
-// else: Reset at the bottom of the list still does every setting.
+// Reset just this card to the selected preset's values.
 function resetGroup(card, group) {
-  const preset = settingsMeta.presets[document.getElementById('preset').value]
-    || settingsMeta.defaults;
+  const preset = selectedPresetValues();
   for (const key of groupKeys(group)) {
     const el = card.querySelector(`[data-key="${key}"]`);
     if (!el || !(key in preset)) continue;
@@ -399,7 +399,7 @@ function buildSettingsForm(values) {
     tab.setAttribute('aria-controls', `setting-panel-${name}`);
     tab.innerHTML = (group.icon ? `<span class="setting-tab-icon" aria-hidden="true">${group.icon}</span>` : '')
       + `<span class="setting-tab-name">${group.title}</span>`
-      + '<span class="setting-tab-dot" title="Changed from the defaults for this kind of place" hidden></span>'
+      + '<span class="setting-tab-dot" title="Changed from preset values" hidden></span>'
       + '<span class="setting-tab-count"></span>';
     tab.addEventListener('click', () => {
       // A tab picked mid-search is the user done searching.
@@ -452,7 +452,7 @@ function openSettingTab(name, remember = false) {
   }
 }
 
-// A dot on a tab that holds a setting moved off the kind of place's value, so
+// A dot on a tab that holds a setting changed from the preset, so
 // a change is not lost behind a tab or a closed Advanced; and the setting's
 // name marked where it is.
 function differs(el, want) {
@@ -466,8 +466,7 @@ function differs(el, want) {
 function markChangedTabs() {
   if (!settingsMeta) return;
   const body = document.getElementById('advanced-body');
-  const preset = settingsMeta.presets[document.getElementById('preset').value]
-    || settingsMeta.defaults;
+  const preset = selectedPresetValues();
   for (const card of body.querySelectorAll('.setting-group')) {
     let moved = false;
     for (const el of card.querySelectorAll('[data-key]')) {
@@ -502,7 +501,8 @@ function showSearchAcrossTabs(query) {
 }
 
 function readSettings() {
-  const out = { preset: document.getElementById('preset').value };
+  const key = document.getElementById('preset').value;
+  const out = { preset: settingsMeta?.presets[key] ? key : '' };
   for (const el of document.querySelectorAll('#advanced-body [data-key]')) {
     // A switch is on or off, and sends the 1 or 0 the generator reads.
     if (el.type === 'checkbox') {
@@ -542,6 +542,7 @@ function rememberMap(map) {
   // really move are sent, so the rest keep the value the map was made with.
   openedMap.shown = readSettings();
   showReapply();
+  markChangedTabs();
   // Editing is about a map that exists, so it waits for one to be open. The
   // shapes of whichever map was open before are cleared rather than left to
   // be edited into a map they do not belong to.
@@ -559,6 +560,7 @@ function rememberMap(map) {
 // The knobs moved since the panel was filled in, by name.
 function changedSettings() {
   if (!openedMap || !openedMap.shown) return [];
+  if (importedSettings) return changedFrom(openedMap.settings, settingsForRequest());
   return changedFrom(openedMap.shown, readSettings());
 }
 
@@ -589,6 +591,7 @@ function settingsForRequest() {
 // The map's own settings with the moved knobs put in: a setting the panel
 // cannot show exactly is left exactly as it was.
 function settingsToApply(changed) {
+  if (importedSettings) return settingsForRequest();
   const now = readSettings();
   const out = { ...(openedMap.settings || {}) };
   for (const key of changed) out[key] = now[key];
@@ -688,19 +691,150 @@ document.getElementById('advanced-body').addEventListener('change', markChangedT
 document.getElementById('advanced-body').addEventListener('listsearch',
   e => showSearchAcrossTabs(e.detail.query));
 
-document.getElementById('preset').addEventListener('change', () => {
+const generationPresetSelect = document.getElementById('preset');
+const generationPresetForm = document.getElementById('generationPresetForm');
+const generationPresetName = document.getElementById('generationPresetName');
+const generationPresetManage = document.getElementById('generationPresetManage');
+const generationPresetStatus = document.getElementById('generationPresetStatus');
+let editingPreset = null;
+let savingPreset = false;
+
+function selectedGenerationPreset() {
+  return generationPresets.find(preset => preset.id === generationPresetSelect.value);
+}
+
+function selectedPresetValues() {
+  return selectedGenerationPreset()?.settings
+    || settingsMeta.presets[generationPresetSelect.value]
+    || openedMap?.settings || importedSettings?.settings || settingsMeta.defaults;
+}
+
+function generationPresetMessage(message) {
+  generationPresetStatus.textContent = message;
+  generationPresetStatus.hidden = !message;
+}
+
+window.syncGenerationPreset = function (key) {
+  generationPresetSelect.value = [...generationPresetSelect.options].some(option => option.value === key)
+    ? key : '';
+  generationPresetForm.hidden = true;
+  generationPresetManage.open = false;
+  generationPresetManage.hidden = !selectedGenerationPreset();
+};
+
+window.focusGenerationPresets = function () {
   if (!settingsMeta) return;
-  importedSettings = null;
-  const preset = settingsMeta.presets[document.getElementById('preset').value];
-  if (preset) buildSettingsForm(preset);
+  const search = document.getElementById('settingFind');
+  search.value = '';
+  search.dispatchEvent(new Event('input'));
+  openSettingTab('map', true);
+  generationPresetSelect.focus();
+};
+
+function showGenerationPresets(presets, selected) {
+  generationPresets = presets;
+  const group = document.getElementById('userGenerationPresets');
+  const options = presets.map(preset => {
+    const option = document.createElement('option');
+    option.value = preset.id;
+    option.textContent = preset.name;
+    option.setAttribute('data-no-translate', '');
+    return option;
+  });
+  group.replaceChildren(...options);
+  group.hidden = !options.length;
+  generationPresetSelect.value = selected;
+  if (generationPresetSelect.selectedIndex < 0) generationPresetSelect.value = '';
+  generationPresetManage.hidden = !selectedGenerationPreset();
+  markChangedTabs();
+}
+
+async function requestGenerationPresets(method = 'GET', id = '', values) {
+  const response = await fetch('/api/generation-presets' + (id ? '/' + encodeURIComponent(id) : ''), {
+    method,
+    ...(values && { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+
+async function refreshGenerationPresets() {
+  try {
+    const data = await requestGenerationPresets();
+    if (!savingPreset) showGenerationPresets(data.presets, generationPresetSelect.value);
+  } catch (error) {
+    generationPresetMessage(error.message);
+  }
+}
+
+function applyGenerationPreset(values) {
+  buildSettingsForm(values);
+  importedSettings = { settings: values, shown: readSettings() };
   showReapply();
+}
+
+generationPresetSelect.addEventListener('change', () => {
+  if (!settingsMeta) return;
+  window.syncGenerationPreset(generationPresetSelect.value);
+  if (generationPresetSelect.value) applyGenerationPreset(selectedPresetValues());
 });
 
 document.getElementById('resetSettings').addEventListener('click', () => {
-  if (!settingsMeta) return;
-  importedSettings = null;
-  const preset = settingsMeta.presets[document.getElementById('preset').value];
-  buildSettingsForm(preset || settingsMeta.defaults);
-  showReapply();
+  if (settingsMeta) applyGenerationPreset(selectedPresetValues());
+});
+
+function askGenerationPresetName(preset) {
+  editingPreset = preset;
+  generationPresetMessage('');
+  generationPresetForm.hidden = false;
+  generationPresetName.value = preset?.name || '';
+  generationPresetName.focus();
+  generationPresetName.select();
+}
+
+async function changeGenerationPresets(method, id, values) {
+  if (savingPreset || !settingsMeta) return;
+  savingPreset = true;
+  const map = openedMap;
+  const selected = generationPresetSelect.value;
+  generationPresetMessage('');
+  try {
+    const data = await requestGenerationPresets(method, id, values);
+    const stillHere = openedMap === map && generationPresetSelect.value === selected;
+    showGenerationPresets(data.presets, stillHere ? data.selection || '' : generationPresetSelect.value);
+    generationPresetForm.hidden = true;
+    generationPresetManage.open = false;
+    generationPresetMessage(method === 'DELETE' ? 'Preset deleted.' : 'Preset saved.');
+  } catch (error) {
+    generationPresetMessage(error.message);
+  } finally {
+    savingPreset = false;
+  }
+}
+
+document.getElementById('generationPresetSave').addEventListener('click', () => askGenerationPresetName(null));
+document.getElementById('generationPresetRename').addEventListener('click', () => {
+  const preset = selectedGenerationPreset();
+  if (preset) askGenerationPresetName(preset);
+});
+document.getElementById('generationPresetCancel').addEventListener('click', () => {
+  generationPresetForm.hidden = true;
+});
+generationPresetForm.addEventListener('submit', event => {
+  event.preventDefault();
+  const name = generationPresetName.value.trim();
+  if (editingPreset) changeGenerationPresets('PATCH', editingPreset.id, { name });
+  else changeGenerationPresets('POST', '', { name, settings: settingsForRequest() });
+});
+document.getElementById('generationPresetUpdate').addEventListener('click', () => {
+  const preset = selectedGenerationPreset();
+  if (preset) changeGenerationPresets('PATCH', preset.id, { settings: settingsForRequest() });
+});
+document.getElementById('generationPresetDelete').addEventListener('click', () => {
+  const preset = selectedGenerationPreset();
+  if (preset && window.confirm(i18n.t('Delete this generation preset?'))) {
+    changeGenerationPresets('DELETE', preset.id);
+  }
 });
 

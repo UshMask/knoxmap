@@ -244,23 +244,6 @@ const fx = (() => {
     map.on(L.Draw.Event.CREATED, () => $('#map-hint')?.remove());
   }
 
-  // ---- kind of place ----------------------------------------------------------
-  function presetCards() {
-    const select = $('#preset');
-    document.querySelectorAll('.preset-card').forEach(card => {
-      card.addEventListener('click', () => {
-        document.querySelectorAll('.preset-card').forEach(c => {
-          const on = c === card;
-          c.classList.toggle('is-on', on);
-          c.setAttribute('aria-checked', on ? 'true' : 'false');
-        });
-        select.value = card.dataset.preset;
-        // app.js listens on the real select; it stays the single source of truth.
-        select.dispatchEvent(new Event('change'));
-      });
-    });
-  }
-
   // ---- settings form ------------------------------------------------------------
   function paintRange(input) {
     const v = parseFloat(input.value);
@@ -523,7 +506,6 @@ const fx = (() => {
   document.addEventListener('DOMContentLoaded', () => {
     versionMenu();
     setTimeout(watchUpdates, 8000);
-    presetCards();
     $('.hint-close')?.addEventListener('click', () => $('#map-hint')?.remove());
     $('#reportLink')?.addEventListener('click', e => { e.preventDefault(); saveReport(); });
   });

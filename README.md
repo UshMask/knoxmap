@@ -132,8 +132,9 @@ already has. See [LINUX.md](LINUX.md).
       **Enter**. Pick a result: **Make a map here** for a box around it, or
       **outline** for the place's real boundary. Start small, a few streets,
       while you get a feel for it.
-   2. Pick a **kind of place** (Town, Suburb, City, Rural) in the **Properties**
-      panel on the right.
+   2. Choose a **preset** (Town, Suburb, City or Rural) in **Properties → Map**.
+      To reuse your own generation settings on another area, choose **Save as
+      preset…**. You can update, rename or delete it under **Manage preset**.
    3. Press the big button in the steps row above the map. It always does what
       comes next: **Generate map ▶**, then **Build ▶**, **Compile ▶** and
       **Install ▶**.
@@ -236,7 +237,7 @@ applies it from cache without touching the network.
 
 ## Tuning a map
 
-Every setting is in the **Properties** panel on the right: *Kind of place* and
+Every setting is in the **Properties** panel on the right: *Presets* and
 *Scale* at the top, then **More settings**, which has a search box. A changed
 setting is put into an open map with only the steps it needs.
 

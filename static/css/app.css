@@ -325,12 +325,14 @@ body.rotate-dragging * {
 .error { color: var(--bad); font-size: 13px; }
 
 /* ---- settings panel ------------------------------------------------------------------ */
-.preset-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 10px; }
-.preset-card {
-  font: inherit; font-size: 13px; background: var(--field); border: 1px solid var(--line-strong);
-  border-radius: 4px; padding: 5px 0; cursor: pointer; color: var(--text);
-}
-.preset-card.is-on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+#preset { width: 100%; }
+.generation-preset-actions { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin-top: 6px; }
+.generation-preset-actions[hidden] { display: none; }
+.generation-preset-actions summary { cursor: pointer; color: var(--muted); }
+#generationPresetManage[open] { flex: 1 0 100%; }
+#generationPresetManage .btn { margin: 5px 3px 0 0; }
+#generationPresetName { min-width: 0; flex: 1 1 100%; }
+#generationPresetStatus { margin-top: 6px; overflow-wrap: anywhere; }
 
 .osm-source-cards {
   display: grid;

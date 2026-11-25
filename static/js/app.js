@@ -1035,9 +1035,7 @@ function applyPortablePreset(p) {
   document.getElementById('metersPerTile').value = p.metersPerTile;
   document.getElementById('presetName').value = p.name;
   if (settingsMeta) {
-    const kinds = document.getElementById('preset');
-    kinds.value = [...kinds.options].some(option => option.value === p.preset)
-      ? p.preset : 'town';
+    window.syncGenerationPreset(p.preset);
     buildSettingsForm({ ...settingsMeta.defaults, ...p.settings });
   }
   openedMap = null;
@@ -1870,7 +1868,10 @@ async function openMap(mapName) {
   showUpgrade(data);
   // The settings this map was made with, back in the panel, so one of them can
   // be changed and put into it without setting all the others again.
-  if (data.settings && settingsMeta) buildSettingsForm(data.settings);
+  if (data.settings && await settingsReady) {
+    window.syncGenerationPreset(data.settings.preset);
+    buildSettingsForm(data.settings);
+  }
   // Whatever was drawn for this map, back on the map to be added to or changed.
   loadZones(data.mapName);
   fetch(`/api/sketch/${encodeURIComponent(data.mapName)}`)

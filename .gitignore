@@ -31,6 +31,8 @@ output/*
 # Setup installs the map tools here and writes local paths here.
 /vendor/
 knoxmap_config.json
+/generation_presets.json
+/generation_presets.json.part
 
 # Building the patched compiler yourself
 worlded/src/

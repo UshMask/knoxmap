@@ -306,10 +306,8 @@
         + item('Layers', () => togglePanel(layers), { on: !layers.hidden })
         + item('Named places', () => togglePanel(places), { on: !places.hidden })
         + item('Reset the layout', resetLayout),
-      Map: () => label('Kind of place')
-        + [...document.querySelectorAll('#presetCards .preset-card')].map(c =>
-            item(c.textContent, () => c.click(), { on: c.classList.contains('is-on'), radio: true })).join('')
-        + item('Reset the settings to this kind', () => click('resetSettings'))
+      Map: () => item('Presets…', () => { props.hidden = false; window.focusGenerationPresets(); })
+        + item('Reset to preset', () => click('resetSettings'))
         + '<hr>' + item('Standalone: play it without Knox County', () => { setView('world'); $('placeStandalone').click(); },
             { on: $('placeStandalone').checked, off: !open || busy })
         + item('Place it in the world…', () => setView('world'), { off: !open })
@@ -641,8 +639,7 @@
 
   // A map opened or just made: it gets a tab, and the workspace shows it.
   // A map opened from its tab, Home or the menu shows where it is: its area on
-  // the map, its scale and its kind of place - not the last map's, and not the
-  // defaults. Its settings are app.js's (openMap puts them back).
+  // the map and its scale. openMap restores the saved settings.
   function showMapArea(data) {
     const b = data.bbox;
     if (!b || b.south == null) return;
@@ -654,15 +651,6 @@
     $('metersPerTile').value = data.metersPerTile || 1;
     setSelection(layer);
     map.fitBounds(layer.getBounds(), { padding: [20, 20] });
-    const kind = data.settings && data.settings.preset;
-    if (kind && [...$('preset').options].some(o => o.value === kind)) {
-      $('preset').value = kind;                    // no change event: that would reset its settings
-      document.querySelectorAll('.preset-card').forEach(c => {
-        const on = c.dataset.preset === kind;
-        c.classList.toggle('is-on', on);
-        c.setAttribute('aria-checked', on ? 'true' : 'false');
-      });
-    }
   }
   // An install that is still current counts as done: the steps used to say
   // Install was next for a map that was already in the game.

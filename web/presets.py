@@ -7,9 +7,11 @@ import os
 import re
 import threading
 import time
+from uuid import uuid4
 
 from flask import Blueprint, jsonify, request, send_file
 
+import knoxfiles
 import knoxlog
 from knoxbuild.settings import PRESETS, Settings
 
@@ -285,13 +287,66 @@ def api_builder_kind():
 # file next to the program, written whole each time through a temporary file so
 # a crash cannot leave half of it.
 PRESETS_FILE = BASE_DIR / "presets.json"
+GENERATION_PRESETS_FILE = BASE_DIR / "generation_presets.json"
 _PRESETS_LOCK = threading.Lock()
+_GENERATION_PRESETS_LOCK = threading.Lock()
 MAX_PRESETS = 200
 MAX_PRESET_POINTS = 5000
 
 
 class PresetsUnreadableError(Exception):
     """Raised when presets.json exists but cannot be read or parsed."""
+
+
+@bp.route("/api/generation-presets", methods=["GET", "POST"])
+@bp.route("/api/generation-presets/<uuid:preset_id>", methods=["PATCH", "DELETE"])
+def api_generation_presets(preset_id=None):
+    """Keep reusable generation settings independently of saved map areas."""
+    action = request.method
+    with _GENERATION_PRESETS_LOCK:
+        path = str(GENERATION_PRESETS_FILE)
+        try:
+            presets = knoxfiles.read(path, "generation presets", default={})
+        except knoxfiles.Damaged:
+            presets = None
+        if not isinstance(presets, dict) or any(
+            not isinstance(item, dict) or not isinstance(item.get("name"), str)
+            or not isinstance(item.get("settings"), dict) for item in presets.values()
+        ):
+            return jsonify({"error": "Generation presets could not be read. Nothing was overwritten."}), 500
+        if action == "GET":
+            return _generation_presets_response(presets)
+
+        key = str(preset_id) if preset_id is not None else str(uuid4())
+        previous = presets.get(key)
+        if preset_id is not None and previous is None:
+            return jsonify({"error": "Generation preset not found."}), 404
+        if action == "DELETE":
+            del presets[key]
+        else:
+            data = _json_body()
+            name = data.get("name", (previous or {}).get("name"))
+            name = name.strip() if isinstance(name, str) else ""
+            values = data.get("settings", (previous or {}).get("settings"))
+            if not 1 <= len(name) <= 60 or not isinstance(values, dict):
+                return jsonify({"error": "Give the preset a name of up to 60 characters and valid settings."}), 400
+            if any(other != key and item["name"].casefold() == name.casefold()
+                   for other, item in presets.items()):
+                return jsonify({"error": "A generation preset already has that name."}), 409
+            if action == "POST" and len(presets) >= MAX_PRESETS:
+                return jsonify({"error": "The generation preset list is full."}), 400
+            presets[key] = {"name": name, "settings": Settings.from_dict(values).to_dict()}
+        try:
+            knoxfiles.write(path, presets, indent=2, ensure_ascii=False)
+        except OSError as exc:
+            return failed(f"Could not save generation presets: {exc}", 500, exc)
+    return _generation_presets_response(presets, selection=key if action != "DELETE" else None)
+
+
+def _generation_presets_response(presets, selection=None):
+    entries = [{"id": key, **item} for key, item in presets.items()]
+    return jsonify({"presets": sorted(entries, key=lambda item: item["name"].casefold()),
+                    "selection": selection})
 
 
 def _backup_file():
